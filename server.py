@@ -187,11 +187,7 @@ reminder_store = ReminderStore(config)                    # Standalone care memo
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable
 # stdio mode ignores host (no network)
-mcp = FastMCP(
-    "Ombre Brain",
-    host="0.0.0.0",
-    port=8000,
-)
+mcp = FastMCP()
 
 
 def _int_env(name: str, default: int) -> int:
