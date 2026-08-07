@@ -63,8 +63,8 @@ import httpx
 # --- 确保同目录下的模块能被正确导入 ---
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from fastmcp import FastMCP
-
+from mcp.server.fastmcp import FastMCP
+Context = object
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
