@@ -64,6 +64,7 @@ import httpx
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 Context = object
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
@@ -188,6 +189,10 @@ reminder_store = ReminderStore(config)                    # Standalone care memo
 # host="0.0.0.0" so Docker container's SSE is externally reachable
 # stdio mode ignores host (no network)
 mcp = FastMCP()
+try:
+    mcp._mcp_server  # 探测属性是否存在,不影响原逻辑
+except Exception:
+    pass
 
 
 def _int_env(name: str, default: int) -> int:
