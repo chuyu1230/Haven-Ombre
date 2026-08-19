@@ -192,7 +192,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 mcp = FastMCP(
     transport_security=TransportSecuritySettings(
-        allowed_hosts=["1cy20041230.zeabur.app", "127.0.0.1", "localhost"],
+        allowed_hosts=["*"],
         allowed_origins=["*"],
     )
 )
