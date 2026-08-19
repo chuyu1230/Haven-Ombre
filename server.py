@@ -192,11 +192,9 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 mcp = FastMCP(
     transport_security=TransportSecuritySettings(
-        allowed_hosts=["*"],
-        allowed_origins=["*"],
+        enable_dns_rebinding_protection=False,
     )
 )
-print("DEBUG TRANSPORT SECURITY:", mcp.settings.transport_security, flush=True)
 
 
 def _int_env(name: str, default: int) -> int:
