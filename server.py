@@ -188,11 +188,14 @@ reminder_store = ReminderStore(config)                    # Standalone care memo
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable
 # stdio mode ignores host (no network)
-mcp = FastMCP()
-try:
-    mcp._mcp_server  # 探测属性是否存在,不影响原逻辑
-except Exception:
-    pass
+from mcp.server.transport_security import TransportSecuritySettings
+
+mcp = FastMCP(
+    transport_security=TransportSecuritySettings(
+        allowed_hosts=["1cy20041230.zeabur.app", "127.0.0.1", "localhost"],
+        allowed_origins=["*"],
+    )
+)
 
 
 def _int_env(name: str, default: int) -> int:
