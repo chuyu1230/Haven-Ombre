@@ -196,6 +196,7 @@ mcp = FastMCP(
         allowed_origins=["*"],
     )
 )
+print("DEBUG TRANSPORT SECURITY:", mcp.settings.transport_security, flush=True)
 
 
 def _int_env(name: str, default: int) -> int:
