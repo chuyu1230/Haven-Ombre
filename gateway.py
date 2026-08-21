@@ -729,11 +729,11 @@ class GatewayService:
             embedding_timeout = float(
                 self.gateway_cfg.get(
                     "embedding_query_timeout_seconds",
-                    embedding_cfg.get("query_timeout_seconds", 3),
+                    embedding_cfg.get("query_timeout_seconds", 30),
                 )
             )
         except (TypeError, ValueError):
-            embedding_timeout = 3.0
+            embedding_timeout = 30.0
         self.embedding_query_timeout_seconds = max(0.0, min(30.0, embedding_timeout))
         self.first_card_min_score = float(self.gateway_cfg.get("first_card_min_score", 0.55))
         self.second_card_min_score = float(self.gateway_cfg.get("second_card_min_score", 0.50))
