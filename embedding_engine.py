@@ -200,6 +200,7 @@ class EmbeddingEngine:
 
         try:
             query_embedding = await self._generate_embedding(query, kind="query")
+            logger.info(f"DEBUG query_embedding_len={len(query_embedding)}")
             if not query_embedding:
                 return []
         except Exception as e:
