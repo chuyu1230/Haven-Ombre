@@ -4257,11 +4257,7 @@ class ReflectionEngine:
         temperature: float,
         thinking_mode: str | None = None,
     ) -> dict[str, Any]:
-        options: dict[str, Any] = {
-    "max_tokens": max_tokens,
-    "temperature": temperature,
-    "response_format": {"type": "json_object"},
-}
+        options: dict[str, Any] = {"max_tokens": max_tokens, "temperature": temperature}
         mode = self.thinking_mode if thinking_mode is None else thinking_mode
         if mode:
             options["extra_body"] = {"thinking": {"type": mode}}
