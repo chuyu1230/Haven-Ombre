@@ -4307,6 +4307,7 @@ class ReflectionEngine:
                 temperature=temperature,
                 thinking_mode="",
             )
+            completion_options["extra_body"] = {"enable_thinking": False}
         return await client.chat.completions.create(
             model=model,
             messages=messages,
