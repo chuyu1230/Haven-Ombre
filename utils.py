@@ -417,7 +417,7 @@ def load_config(config_path: str = None) -> dict:
             "daily_chat_memory_base_url": "",
             "daily_chat_memory_timeout_seconds": 180,
             "daily_chat_memory_summary_model": "",
-            "daily_chat_memory_summary_max_tokens": 2200,
+            "daily_chat_memory_summary_max_tokens": 4000,
             "daily_chat_memory_candidate_model": "",
             "daily_chat_memory_candidate_max_tokens": 3200,
             "daily_activity_summary_enabled": True,
