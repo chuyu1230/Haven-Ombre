@@ -2621,6 +2621,11 @@ class ReflectionEngine:
                 temperature=self.temperature,
                 use_daily_client=use_daily_client,
             )
+            logger.info("DEBUG message_content=%r", response.choices[0].message.content)
+            logger.info(
+                "DEBUG reasoning_content=%r",
+                getattr(response.choices[0].message, "reasoning_content", None),
+            )
             raw = self._completion_content(response)
             logger.info("DEBUG daily_memory_raw=%r", raw)
             parsed = self._parse_json_object(raw or "")
