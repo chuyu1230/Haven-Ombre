@@ -1367,6 +1367,15 @@ class ReflectionEngine:
                 thinking_mode="" if use_dehydration else None,
             ),
         )
+        message = response.choices[0].message if response.choices else None
+        content = str(getattr(message, "content", None) or "") if message else ""
+        logger.info("DEBUG reflection_content_len=%s", len(content))
+        logger.info("DEBUG reflection_content_tail=%r", content[-300:])
+        reasoning = getattr(message, "reasoning_content", None) if message else None
+        if reasoning is not None:
+            reasoning_text = str(reasoning or "")
+            logger.info("DEBUG reflection_reasoning_len=%s", len(reasoning_text))
+            logger.info("DEBUG reflection_reasoning_tail=%r", reasoning_text[-300:])
         raw = response.choices[0].message.content if response.choices else ""
         parsed = self._parse_json_object(raw or "")
         if not parsed:
