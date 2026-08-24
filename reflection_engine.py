@@ -189,6 +189,7 @@ DAILY_CHAT_MEMORY_PROMPT_TEMPLATE = """这是 {user_display_name} 和 {ai_name} 
       "kind": "key_event",
       "title": "短标题",
       "content": "长期记忆候选",
+      "confidence": 0.72,
       "source_event_ids": [101, 102],
       "source_turn_ids": [1, 2]
     }
@@ -196,6 +197,7 @@ DAILY_CHAT_MEMORY_PROMPT_TEMPLATE = """这是 {user_display_name} 和 {ai_name} 
 }
 
 kind 可用 key_event / stable_preference / boundary / signal / commitment / project_state / relationship_anchor。
+confidence 必须是 0.0-1.0 的数字：重要长期信息用 0.7-1.0；一般但有价值的信息用 0.55-0.7；不确定的信息不要生成。
 没有候选时返回 {"candidates": []}。"""
 
 
