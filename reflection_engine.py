@@ -4279,13 +4279,22 @@ class ReflectionEngine:
         return {
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "extra_body": {"enable_thinking": False},
+            "extra_body": {
+                "enable_thinking": False,
+                "thinking": {"type": "disabled"},
+            },
         }
 
     @staticmethod
     def _completion_content(response: Any) -> str:
         try:
-            return str(response.choices[0].message.content or "") if response.choices else ""
+            if not response.choices:
+                return ""
+            message = response.choices[0].message
+            content = str(getattr(message, "content", None) or "")
+            if content.strip():
+                return content
+            return str(getattr(message, "reasoning_content", None) or "")
         except (AttributeError, IndexError, TypeError):
             return ""
 
@@ -4308,9 +4317,12 @@ class ReflectionEngine:
             completion_options = self._completion_options(
                 max_tokens=max_tokens,
                 temperature=temperature,
-                thinking_mode="",
+                thinking_mode="disabled",
             )
-            completion_options["extra_body"] = {"enable_thinking": False}
+            extra_body = dict(completion_options.get("extra_body") or {})
+            extra_body["enable_thinking"] = False
+            extra_body["thinking"] = {"type": "disabled"}
+            completion_options["extra_body"] = extra_body
         return await client.chat.completions.create(
             model=model,
             messages=messages,
