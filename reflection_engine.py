@@ -1355,17 +1355,22 @@ class ReflectionEngine:
         if not client or not model:
             raise RuntimeError("reflection_generator_unavailable")
         payload = {"period": period, "date": key, **materials}
+        completion_options = self._completion_options(
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            thinking_mode="" if use_dehydration else None,
+        )
+        extra_body = dict(completion_options.get("extra_body") or {})
+        extra_body["enable_thinking"] = False
+        extra_body["thinking"] = {"type": "disabled"}
+        completion_options["extra_body"] = extra_body
         response = await client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": self._reflect_prompt()},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
-            **self._completion_options(
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                thinking_mode="" if use_dehydration else None,
-            ),
+            **completion_options,
         )
         message = response.choices[0].message if response.choices else None
         content = str(getattr(message, "content", None) or "") if message else ""
