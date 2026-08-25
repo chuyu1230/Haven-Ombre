@@ -126,6 +126,9 @@ GENERIC_LEXICAL_STOPWORD_KEYS = frozenset(
 )
 FAVORITE_MEMORY_MARKER = "[[ombre:favorite]]"
 RETRYABLE_UPSTREAM_STATUS_CODES = {401, 403, 429, 500, 502, 503, 504}
+GATEWAY_UPSTREAM_MODEL_ALIASES = {
+    "deepseek-v4-flash": "deepseek-ai/DeepSeek-V4-Flash",
+}
 DUPLICATE_CONVERSATION_TURN_WINDOW_SECONDS = 120
 DOMAIN_SENTINEL_ALLOWED_DOMAINS = frozenset(
     {
@@ -21269,17 +21272,25 @@ class GatewayService:
         else:
             if not normalized_model:
                 raise ValueError("model is required when gateway has multiple upstreams")
+            lookup_models = [normalized_model]
+            aliased_model = GATEWAY_UPSTREAM_MODEL_ALIASES.get(normalized_model)
+            if aliased_model and aliased_model not in lookup_models:
+                lookup_models.append(aliased_model)
             upstream = next(
                 (
                     candidate
                     for candidate in self.upstreams
-                    if normalized_model in candidate.get("model_map", {})
+                    if any(name in candidate.get("model_map", {}) for name in lookup_models)
                 ),
                 None,
             )
             if upstream is None:
                 raise ValueError(f'model "{normalized_model}" is not configured in gateway.upstreams')
-            upstream_model = upstream.get("model_map", {}).get(normalized_model, normalized_model)
+            model_map = upstream.get("model_map", {})
+            mapped_model = next((name for name in lookup_models if name in model_map), normalized_model)
+            upstream_model = model_map.get(mapped_model, mapped_model)
+
+        upstream_model = GATEWAY_UPSTREAM_MODEL_ALIASES.get(upstream_model, upstream_model)
 
         if not upstream.get("base_url"):
             raise RuntimeError(f'gateway upstream "{upstream["name"]}" base_url is not configured')
