@@ -619,5 +619,11 @@
       "reason",
       "what happened"
     ]
+  },
+  "proactive_outbound": {
+    "required_markers": [
+      "小羽主动找阿钰发消息",
+      "禁止回复上一个问题"
+    ]
   }
 }

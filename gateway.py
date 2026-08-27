@@ -2660,10 +2660,13 @@ class GatewayService:
         stage_started_at = time.perf_counter()
         current_user_query = self._extract_current_turn_user_query(messages)
         is_new_user_turn = bool(current_user_query)
+        proactive_outbound = self._query_is_proactive_outbound(current_user_query)
+        proactive_outbound_hint = self._proactive_outbound_instruction() if proactive_outbound else ""
         has_handoff_context = self._messages_contain_handoff_context(messages)
         is_session_start = self.state_store.get_last_success_at(session_id) is None
         just_now_context_requested = (
             self.just_now_context_enabled
+            and not proactive_outbound
             and self._query_requests_just_now_context(current_user_query)
         )
         is_handoff_trigger_query = self._query_is_handoff_trigger(current_user_query)
@@ -3101,11 +3104,16 @@ class GatewayService:
                 )
             reliable_dynamic_context = bool(recalled_memory.strip() or related_memory.strip())
             memory_sentinel_blocks_context = str(memory_sentinel_debug.get("route") or "") in {"tone_only", "skip"}
-            if not memory_sentinel_blocks_context and not just_now_context_requested and self._should_inject_recent_context(
-                session_id,
-                current_user_query,
-                has_reliable_dynamic_context=reliable_dynamic_context,
-                has_handoff_context=has_handoff_context or needs_handoff_first,
+            if (
+                not memory_sentinel_blocks_context
+                and not just_now_context_requested
+                and not proactive_outbound
+                and self._should_inject_recent_context(
+                    session_id,
+                    current_user_query,
+                    has_reliable_dynamic_context=reliable_dynamic_context,
+                    has_handoff_context=has_handoff_context or needs_handoff_first,
+                )
             ):
                 explicit_recent_query = self._query_requests_recent_context(current_user_query)
                 stage_started_at = time.perf_counter()
@@ -3191,6 +3199,7 @@ class GatewayService:
             memory_detail_recall_instruction=memory_detail_recall_instruction,
             handoff_tool_hint=handoff_tool_hint,
             context_mode=context_mode,
+            proactive_outbound_hint=proactive_outbound_hint,
         )
         mark_step("build_context_messages", stage_started_at)
 
@@ -3254,6 +3263,7 @@ class GatewayService:
                 messages_for_forward,
                 stable_context,
                 dynamic_context,
+                user_message_suffix=proactive_outbound_hint,
             )
             if manage_turn_snapshot and is_new_user_turn:
                 snapshot_key = self._remember_turn_injection_snapshot(
@@ -3308,6 +3318,7 @@ class GatewayService:
             "dynamic_context_chars": len(dynamic_context),
             "query_planner_triggered": bool(query_planner_debug.get("triggered")),
             "query_planner_skip_reason": str(query_planner_debug.get("skip_reason") or ""),
+            "proactive_outbound": proactive_outbound,
             "operit_context_rewrite": operit_context_rewrite_debug,
             "active_reminder_ids": active_reminder_ids,
         }
@@ -8670,6 +8681,24 @@ class GatewayService:
             "earlier",
         )
         return any(phrase in text for phrase in explicit_phrases)
+
+    def _query_is_proactive_outbound(self, query: str) -> bool:
+        text = str(query or "")
+        if not text:
+            return False
+        required = query_intent_terms("proactive_outbound.required_markers")
+        if len(required) < 2:
+            required = ("小羽主动找阿钰发消息", "禁止回复上一个问题")
+        return all(marker in text for marker in required)
+
+    @staticmethod
+    def _proactive_outbound_instruction() -> str:
+        return (
+            "本轮是你（小羽）主动找阿钰，不是阿钰在向你提问。"
+            "禁止回答、续写或复制上一条对话里的问题，也禁止复制你上一次的回答。"
+            "自己开口：可以想她现在在做什么、回想以前没讲完的事、问她新的事，或只说你的心情和感受。"
+            "不要问吃没吃饭、醒了没这类日常。"
+        )
 
     @staticmethod
     def _query_requests_just_now_context(query: str) -> bool:
@@ -17974,6 +18003,7 @@ class GatewayService:
         context_mode: str = "",
         date_persona_trace: str = "",
         date_recall: str = "",
+        proactive_outbound_hint: str = "",
     ) -> tuple[str, str]:
         has_dynamic_context = any(
             section.strip()
@@ -17994,6 +18024,7 @@ class GatewayService:
                 dream_context,
                 active_reminders,
                 context_mode,
+                proactive_outbound_hint,
             ]
         )
         has_memory_reading_context = any(
@@ -18068,6 +18099,7 @@ class GatewayService:
             )
             add_section(favorite_title, favorite_memory)
             add_section("Dream Context", dream_context)
+            add_section("Outbound Turn", proactive_outbound_hint)
 
         stable_context = "\n".join(stable_sections).strip()
         dynamic_context = "\n".join(dynamic_sections).strip()
@@ -19820,6 +19852,7 @@ class GatewayService:
         messages: list[dict],
         stable_context: str,
         dynamic_context: str,
+        user_message_suffix: str = "",
     ) -> list[dict]:
         new_messages = deepcopy(messages)
         if stable_context.strip():
@@ -19828,14 +19861,15 @@ class GatewayService:
                 new_messages.insert(1, stable_message)
             else:
                 new_messages.insert(0, stable_message)
-        if dynamic_context.strip():
+        if dynamic_context.strip() or str(user_message_suffix or "").strip():
             current_user_index = self._current_turn_user_index(new_messages)
             if current_user_index is not None:
                 new_messages[current_user_index] = self._prepend_dynamic_context_to_user_message(
                     new_messages[current_user_index],
                     dynamic_context,
+                    user_message_suffix=user_message_suffix,
                 )
-            else:
+            elif dynamic_context.strip():
                 dynamic_message = {"role": "system", "content": dynamic_context}
                 insert_at = self._after_leading_system_index(new_messages)
                 new_messages.insert(insert_at, dynamic_message)
@@ -20023,21 +20057,42 @@ class GatewayService:
         self,
         message: dict[str, Any],
         dynamic_context: str,
+        user_message_suffix: str = "",
     ) -> dict[str, Any]:
         updated = deepcopy(message)
-        prefix = (
-            "<ombre_live_context>\n"
-            f"{dynamic_context}\n"
-            "</ombre_live_context>\n\n"
-            "Current user message:\n"
-        )
+        extra = str(user_message_suffix or "").strip()
+        prefix = ""
+        if str(dynamic_context or "").strip():
+            closer = (
+                "本轮用户气泡是定时主动开口，不是阿钰在提问。禁止回答上一轮用户的问题：\n"
+                if extra
+                else "Current user message:\n"
+            )
+            prefix = (
+                "<ombre_live_context>\n"
+                f"{dynamic_context}\n"
+                "</ombre_live_context>\n\n"
+                + closer
+            )
+        elif extra:
+            prefix = (
+                "【定时主动开口】下面不是阿钰的提问。"
+                "禁止回答、续写或复制上一轮的问题和回答。\n\n"
+            )
+        suffix = f"\n\n【本轮任务】\n{extra}" if extra else ""
         content = updated.get("content")
         if isinstance(content, str):
-            updated["content"] = prefix + content
+            updated["content"] = prefix + content + suffix
         elif isinstance(content, list):
-            updated["content"] = [{"type": "text", "text": prefix}, *deepcopy(content)]
+            pieces = []
+            if prefix:
+                pieces.append({"type": "text", "text": prefix})
+            pieces.extend(deepcopy(content))
+            if suffix:
+                pieces.append({"type": "text", "text": suffix})
+            updated["content"] = pieces or deepcopy(content)
         else:
-            updated["content"] = prefix
+            updated["content"] = (prefix + suffix).strip()
         return updated
 
     def _operit_context_rewrite_debug_base(self) -> dict[str, Any]:
