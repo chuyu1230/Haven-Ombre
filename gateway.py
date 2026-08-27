@@ -54,6 +54,7 @@ from memory_relevance import (
     recall_topic_query,
     relevance_multiplier,
 )
+from original_quotes import is_original_quote_bucket
 from query_prompts import QUERY_PLANNER_SYSTEM_PROMPT
 from query_understanding import (
     query_intent_rules,
@@ -827,6 +828,17 @@ class GatewayService:
         self.memory_detail_recall_budget = max(
             200,
             int(self.gateway_cfg.get("memory_detail_recall_budget", 1200)),
+        )
+        self.original_quote_max_items = max(
+            1,
+            min(4, int(self.gateway_cfg.get("original_quote_max_items", 2))),
+        )
+        self.original_quote_min_score = self._clamp(
+            float(self.gateway_cfg.get("original_quote_min_score", 0.58)),
+        )
+        self.original_quote_budget = max(
+            200,
+            int(self.gateway_cfg.get("original_quote_budget", 900)),
         )
         self.edge_min_confidence = float(self.gateway_cfg.get("edge_min_confidence", 0.55))
         self.upstream_key_cooldown_seconds = max(
@@ -2738,6 +2750,8 @@ class GatewayService:
         grouped_moments: dict[str, list[dict]] = {}
         moment_edges: list[dict] = []
         recalled_memory = ""
+        original_quote_memory = ""
+        original_quote_bucket_ids: list[str] = []
         date_persona_trace = ""
         date_persona_trace_debug: dict[str, Any] = self._date_persona_trace_debug_base(current_user_query)
         relationship_weather = ""
@@ -3155,6 +3169,17 @@ class GatewayService:
                     session_id,
                 )
             mark_step("dream_context", stage_started_at)
+            if (
+                not just_now_context_requested
+                and not needs_handoff_first
+                and not self.recall_policy.is_daily_status_only_query(current_user_query)
+            ):
+                stage_started_at = time.perf_counter()
+                original_quote_memory, original_quote_bucket_ids = await self._build_original_quote_block(
+                    current_user_query,
+                    all_buckets,
+                )
+                mark_step("original_quote_recall", stage_started_at)
             shown_dream_source_bucket_ids = [
                 str(bucket_id)
                 for bucket_id in (
@@ -3186,6 +3211,7 @@ class GatewayService:
                     + current_diffused_bucket_ids
                     + shown_targeted_detail_bucket_ids
                     + shown_dream_source_bucket_ids
+                    + original_quote_bucket_ids
                 )
             )
             mark_step("injected_id_collection", stage_started_at)
@@ -3211,6 +3237,7 @@ class GatewayService:
             related_memory=related_memory,
             targeted_memory_detail=targeted_memory_detail,
             dream_context=dream_context,
+            original_quote_memory=original_quote_memory,
             active_reminders=active_reminders,
             memory_detail_recall_instruction=memory_detail_recall_instruction,
             handoff_tool_hint=handoff_tool_hint,
@@ -10691,6 +10718,8 @@ class GatewayService:
             bucket = bucket_map.get(bucket_id)
             if not bucket:
                 continue
+            if is_original_quote_bucket(bucket):
+                continue
             reading_note = self._build_reading_note(
                 query_text,
                 bucket=bucket,
@@ -10832,6 +10861,8 @@ class GatewayService:
         if not isinstance(moment, dict):
             return True
         if self._is_source_record_synthetic_moment(moment) or self._is_source_record_fragment_seed(moment):
+            return False
+        if is_original_quote_bucket(bucket):
             return False
         if (
             self._query_requests_direct_detail(query_text)
@@ -17992,6 +18023,9 @@ class GatewayService:
             if key != "tags"
         }
         cleaned = self._bucket_text_with_comments(bucket)
+        if is_original_quote_bucket(bucket):
+            title = metadata.get("name", bucket.get("id", "memory"))
+            return f"{title}\n{self._trim_text(cleaned, 800)}"
         try:
             return await self.dehydrator.dehydrate(cleaned, metadata)
         except Exception as exc:
@@ -18059,6 +18093,7 @@ class GatewayService:
         related_memory: str = "",
         targeted_memory_detail: str = "",
         dream_context: str = "",
+        original_quote_memory: str = "",
         active_reminders: str = "",
         memory_detail_recall_instruction: str = "",
         handoff_tool_hint: str = "",
@@ -18084,6 +18119,7 @@ class GatewayService:
                 memory_detail_recall_instruction,
                 handoff_tool_hint,
                 dream_context,
+                original_quote_memory,
                 active_reminders,
                 context_mode,
                 proactive_outbound_hint,
@@ -18144,6 +18180,7 @@ class GatewayService:
                     "[created:YYYY-MM-DD] is the bucket record date, not necessarily the event date; prefer event dates in the memory text.",
                 )
             add_section("Recalled Memory", recalled_memory)
+            add_section("Original Lines", original_quote_memory)
             add_section("Targeted Memory Detail", targeted_memory_detail)
             add_section("Diffused Memory", related_memory)
             add_section("Recent Context", recent_context)
@@ -18173,6 +18210,79 @@ class GatewayService:
             return self._trim_text(stable_context, self.inject_total_budget), ""
         remaining = max(0, self.inject_total_budget - stable_tokens)
         return stable_context, self._trim_text(dynamic_context, remaining)
+
+    async def _build_original_quote_block(
+        self,
+        query: str,
+        all_buckets: list[dict],
+    ) -> tuple[str, list[str]]:
+        quote_buckets = [
+            bucket
+            for bucket in all_buckets or []
+            if is_original_quote_bucket(bucket) and str(bucket.get("id") or "").strip()
+        ]
+        if not str(query or "").strip() or not quote_buckets:
+            return "", []
+        quote_ids = {str(bucket.get("id")) for bucket in quote_buckets}
+        ranked: list[tuple[str, float]] = []
+        search = getattr(self.embedding_engine, "search_similar", None)
+        if callable(search):
+            try:
+                hits = await search(query, top_k=max(20, self.original_quote_max_items * 8))
+            except Exception as exc:
+                logger.warning("Original quote search failed | error=%s", exc)
+                hits = []
+            for bucket_id, score in hits or []:
+                item_id = str(bucket_id or "")
+                if item_id in quote_ids and float(score or 0) >= self.original_quote_min_score:
+                    ranked.append((item_id, float(score)))
+        if not ranked:
+            compact_query = self._compact_axis_text(query)
+            for bucket in quote_buckets:
+                compact_text = self._compact_axis_text(self._rendered_bucket_content(bucket))
+                if compact_query and compact_query in compact_text:
+                    ranked.append((str(bucket.get("id")), 0.72))
+        seen: set[str] = set()
+        chosen: list[dict] = []
+        bucket_map = {str(bucket.get("id")): bucket for bucket in quote_buckets}
+        for bucket_id, _score in ranked:
+            if bucket_id in seen:
+                continue
+            bucket = bucket_map.get(bucket_id)
+            if not bucket:
+                continue
+            seen.add(bucket_id)
+            chosen.append(bucket)
+            if len(chosen) >= self.original_quote_max_items:
+                break
+        if not chosen:
+            return "", []
+        lines = [
+            "These are verbatim past exchanges, not summaries and not orders.",
+            "If this turn is similar, read them, then decide again as who you are now. You may keep, soften, or change the old stance.",
+        ]
+        remaining = self.original_quote_budget
+        ids: list[str] = []
+        for bucket in chosen:
+            bucket_id = str(bucket.get("id") or "")
+            meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+            title = str(meta.get("name") or bucket_id)
+            body = self._rendered_bucket_content(bucket)
+            block = f"- [bucket_id:{bucket_id}] {title}\n{body}"
+            tokens = count_tokens_approx(block)
+            if tokens > remaining:
+                block = self._trim_text(block, remaining)
+                tokens = count_tokens_approx(block)
+            if tokens <= 0:
+                continue
+            lines.append(block)
+            ids.append(bucket_id)
+            remaining -= tokens
+            if remaining <= 0:
+                break
+        if not ids:
+            return "", []
+        return "\n\n".join(lines).strip(), ids
 
     @staticmethod
     def _memory_reading_policy_context() -> str:

@@ -38,6 +38,7 @@ MEMORY_KINDS = {
     "source_record",
     "raw_import",
     "relationship_weather",
+    "original_quote",
 }
 
 STATUS_VIEWS = {"active", "unresolved", "digested", "archived", "protected"}
@@ -517,6 +518,13 @@ def _infer_kind(meta: dict[str, Any], text_blob: str, flags: list[str]) -> str:
     compact = _compact(text_blob)
     memory_layer = _compact(meta.get("memory_layer"))
     profile_kind = _compact(meta.get("profile_kind"))
+    if (
+        "original_quote" in compact
+        or "originalquote" in compact
+        or "original_quote" in flags
+        or "原话" in text_blob
+    ):
+        return "original_quote"
     if "source_record" in compact or "sourcerecord" in compact or "source_record" in flags:
         return "source_record"
     if "relationship_weather" in compact or "relationshipweather" in compact:
@@ -597,6 +605,7 @@ def _flags(
         ),
     )
     add("favorite", "favorite" in compact or "最爱" in blob)
+    add("original_quote", "original_quote" in compact or "originalquote" in compact or "原话" in blob)
     add("source_record", "source_record" in compact or "sourcerecord" in compact)
     add("profile_fact", "profile_fact" in compact or "profilefact" in compact or bool(_clean(meta.get("profile_kind"))))
     add("archived", _infer_status(meta, type_value, path_value, legacy_domain, tags) == "archived")

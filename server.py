@@ -75,6 +75,13 @@ from embedding_engine import EmbeddingEngine
 from favorite_tags import has_favorite_memory_tag, has_favorite_policy_tag
 from gateway_state import GatewayStateStore
 from identity import identity_names
+from original_quotes import (
+    ORIGINAL_QUOTE_KIND,
+    ORIGINAL_QUOTE_SOURCE,
+    ORIGINAL_QUOTE_TAG,
+    format_original_quote_content,
+    is_original_quote_bucket,
+)
 from identity_semantics import IdentitySemanticStore
 from import_memory import ImportEngine
 from memory_diffusion import (
@@ -3033,6 +3040,9 @@ async def _enrich_memory_async(bucket_id: str, *, force: bool = False) -> None:
         bucket = await bucket_mgr.get(bucket_id)
         if is_self_anchor_bucket(bucket):
             logger.debug("Skip self-anchor enrichment / 跳过自我入口关系补全: %s", bucket_id)
+            return
+        if is_original_quote_bucket(bucket):
+            logger.debug("Skip original-quote enrichment / 跳过原话桶改写: %s", bucket_id)
             return
         result = await reflection_engine.enrich_bucket(
             bucket_id,
@@ -8397,6 +8407,45 @@ async def hold(
     action = "合并→" if is_merged else "新建→"
     related_note = _format_readonly_related_memory(related_bucket) if related_bucket else ""
     return f"{action}{result_name} {','.join(domain)}{related_note}"
+
+
+@mcp.tool()
+async def hold_original(
+    user_line: str,
+    assistant_line: str,
+    note: str = "",
+    title: str = "",
+    date: str = "",
+) -> str:
+    """只存一对原话：阿钰当时怎么问、小羽当时怎么答。不要拿来记流水账或缩写事件。相近话题时 Gateway 会原样召回，让现在的小羽再想一遍，而不是当命令复读。"""
+    await decay_engine.ensure_started()
+    user_text = " ".join(str(user_line or "").split())
+    assistant_text = " ".join(str(assistant_line or "").split())
+    if not user_text or not assistant_text:
+        return "原话需要同时有问句和答句。"
+    names = _identity()
+    content = format_original_quote_content(
+        user_text,
+        assistant_text,
+        user_name=str(names.get("user_name") or "阿钰"),
+        ai_name=str(names.get("ai_name") or "小羽"),
+        note=note,
+    )
+    suggested = str(title or "").strip() or user_text[:24]
+    bucket_id = await bucket_mgr.create(
+        content=content,
+        tags=[ORIGINAL_QUOTE_TAG],
+        importance=8,
+        domain=["relationship"],
+        valence=0.5,
+        arousal=0.4,
+        name=suggested,
+        source=ORIGINAL_QUOTE_SOURCE,
+        date=str(date or "").strip() or None,
+        extra_metadata={"kind": ORIGINAL_QUOTE_KIND},
+    )
+    _queue_embedding_refresh(bucket_id)
+    return f"原话→{bucket_id}"
 
 
 # =============================================================
