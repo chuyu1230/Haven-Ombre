@@ -1550,6 +1550,8 @@ class RecallPolicy:
         text = str(query or "").strip()
         if not text:
             return True, "empty_query"
+        if self.is_daily_status_only_query(text):
+            return True, "daily_status_only"
         if self.is_auto_query_too_vague(text):
             return True, "auto_vague_query"
         protected_phrases = tuple(extract_protected_phrases(text))
@@ -1564,6 +1566,7 @@ class RecallPolicy:
             and not self.is_detail_read_query(text)
             and not self.requires_topic_evidence(text)
             and not query_has_facet(text, "embodiment", self.options)
+            and not self.is_self_or_bond_recall_query(text)
         ):
             return True, "no_locatable_terms"
         return False, ""
@@ -1607,6 +1610,48 @@ class RecallPolicy:
         text = " ".join(str(query or "").lower().split())
         return any(marker in text for marker in OLD_OR_RESOLVED_QUERY_MARKERS)
 
+    def _query_has_self_or_bond_marker(self, query: str) -> bool:
+        text = str(query or "").strip()
+        if not text:
+            return False
+        compact = self._compact_marker_text(text)
+        return any(
+            self._marker_in_text(marker, text, compact)
+            for marker in query_intent_terms("self_bond_recall.markers")
+        )
+
+    def is_self_or_bond_recall_query(self, query: str) -> bool:
+        text = str(query or "").strip()
+        if not text:
+            return False
+        if self._query_has_self_or_bond_marker(text):
+            return True
+        if query_has_facet(text, "intimacy", self.options) or query_has_facet(text, "embodiment", self.options):
+            return True
+        return self._query_has_relationship_intent(text)
+
+    def is_daily_status_only_query(self, query: str) -> bool:
+        text = str(query or "").strip()
+        if not text or self._query_has_self_or_bond_marker(text):
+            return False
+        compact = self._compact_marker_text(text)
+        if not any(
+            self._marker_in_text(marker, text, compact)
+            for marker in query_intent_terms("self_bond_recall.daily_status_markers")
+        ):
+            return False
+        duration_keys = {
+            self._compact_entity_keyword(term)
+            for term in query_intent_terms("self_bond_recall.duration_terms")
+            if self._compact_entity_keyword(term)
+        }
+        leftover = [
+            term
+            for term in self.locatable_query_terms(text)
+            if self._compact_entity_keyword(term) not in duration_keys
+        ]
+        return not leftover
+
     def is_auto_query_too_vague(self, query: str) -> bool:
         text = str(query or "").strip()
         if not text:
@@ -1619,6 +1664,10 @@ class RecallPolicy:
             return True
         if self._is_current_time_status_only_query(text):
             return True
+        if self.is_daily_status_only_query(text):
+            return True
+        if self.is_self_or_bond_recall_query(text):
+            return False
         if query_has_explicit_entity_marker(text) or query_has_technical_recall_marker(text):
             return False
         if self._is_affection_only_query(text):

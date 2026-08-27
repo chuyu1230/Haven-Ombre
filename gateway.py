@@ -12350,6 +12350,8 @@ class GatewayService:
         query_plan = self._recall_query_plan(text)
         if self._query_requests_recent_context(text) or self._query_requests_just_now_context(text):
             return False
+        if self.recall_policy.is_self_or_bond_recall_query(text):
+            return False
         if self._query_requests_date_recall(text) or self._query_requests_date_persona_trace(text):
             return False
         if query_plan.skip_long_term_recall:
@@ -12432,6 +12434,14 @@ class GatewayService:
         identity_name_terms = self._identity_name_search_terms(query)
         if locatable_terms:
             base = " ".join(locatable_terms[:6])
+        elif self.recall_policy.is_self_or_bond_recall_query(query):
+            topic = self._normalized_recall_query(query) or str(query or "").strip()
+            user_name = str(
+                self.identity.get("user_display_name")
+                or self.identity.get("user_name")
+                or ""
+            ).strip()
+            base = f"{user_name} {topic}".strip() if user_name else topic
         elif identity_name_terms:
             base = " ".join(identity_name_terms[:8])
         else:
@@ -13095,12 +13105,13 @@ class GatewayService:
                 "confidence": 0.95,
             }
         if self._memory_sentinel_obvious_tone_only_query(text):
-            return {
-                "route": "tone_only",
-                "reason": "tone contact without searchable anchor",
-                "anchors": [],
-                "confidence": 0.9,
-            }
+            if not self.recall_policy.is_self_or_bond_recall_query(text):
+                return {
+                    "route": "tone_only",
+                    "reason": "tone contact without searchable anchor",
+                    "anchors": [],
+                    "confidence": 0.9,
+                }
         return None
 
     def _memory_sentinel_searchable_residue_terms(self, query: str) -> list[str]:
@@ -17097,8 +17108,12 @@ class GatewayService:
                 return False
         if decision.admit_direct and decision.reason == "non_explicit_query":
             if not self._bucket_has_reliable_recall_signal(query, item):
-                item["admission_reason"] = "low_recall_evidence"
-                return False
+                if not (
+                    self.recall_policy.is_self_or_bond_recall_query(query)
+                    and "semantic_hit" in evidence_labels
+                ):
+                    item["admission_reason"] = "low_recall_evidence"
+                    return False
         if decision.admit_direct and dynamic_anchor_missing:
             item["admission_reason"] = "discriminative_anchor_missing"
             item["blocked_reason"] = "discriminative_anchor_missing"
@@ -17122,6 +17137,13 @@ class GatewayService:
             }
             return False
         if decision.admit_direct and not hard_evidence_labels:
+            if (
+                self.recall_policy.is_self_or_bond_recall_query(query)
+                and "semantic_hit" in evidence_labels
+            ):
+                item["admission_reason"] = "self_bond_semantic"
+                item["blocked_reason"] = ""
+                return True
             reason = self._weak_bucket_evidence_block_reason(evidence_labels)
             item["admission_reason"] = reason
             item["blocked_reason"] = reason
