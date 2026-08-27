@@ -485,6 +485,8 @@ gateway:
   recall_admission_rerank_score: 0.65
   edge_min_confidence: 0.55
   upstream_key_cooldown_seconds: 300
+  upstream_timeout_seconds: 180
+  upstream_connect_timeout_seconds: 20
   # Env vars:
   #   OMBRE_GATEWAY_TOKEN
   #   OMBRE_GATEWAY_UPSTREAM_API_KEY

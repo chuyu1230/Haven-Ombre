@@ -126,6 +126,8 @@ GENERIC_LEXICAL_STOPWORD_KEYS = frozenset(
 )
 FAVORITE_MEMORY_MARKER = "[[ombre:favorite]]"
 RETRYABLE_UPSTREAM_STATUS_CODES = {401, 403, 429, 500, 502, 503, 504}
+UPSTREAM_STREAM_KEEPALIVE = b": ombre-keepalive\n\n"
+UPSTREAM_STREAM_KEEPALIVE_SECONDS = 12.0
 GATEWAY_UPSTREAM_MODEL_ALIASES = {
     "deepseek-v4-flash": "deepseek-ai/DeepSeek-V4-Flash",
 }
@@ -835,8 +837,22 @@ class GatewayService:
         self.pending_turn_injections: dict[str, dict[str, dict[str, Any]]] = {}
         self.turn_injection_snapshot_ttl_seconds = 3600.0
         self.turn_injection_snapshot_max_per_session = 4
-
-        self.http_client = http_client or httpx.AsyncClient(timeout=60.0)
+        self.upstream_connect_timeout_seconds = max(
+            5.0,
+            min(60.0, float(self.gateway_cfg.get("upstream_connect_timeout_seconds", 20))),
+        )
+        self.upstream_timeout_seconds = max(
+            60.0,
+            min(600.0, float(self.gateway_cfg.get("upstream_timeout_seconds", 180))),
+        )
+        self.http_client = http_client or httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                connect=self.upstream_connect_timeout_seconds,
+                read=self.upstream_timeout_seconds,
+                write=60.0,
+                pool=20.0,
+            )
+        )
 
     async def close(self) -> None:
         if self.http_client and not getattr(self.http_client, "is_closed", False):
@@ -3784,34 +3800,7 @@ class GatewayService:
                 injection_debug=injection_debug,
             )
         stream_started_at = time.perf_counter()
-        upstream_open_started_at = time.perf_counter()
-        upstream_response = await self._open_upstream_stream(route, payload)
-        upstream_headers_ms = max(0, int((time.perf_counter() - upstream_open_started_at) * 1000))
-        content_type = upstream_response.headers.get("content-type", "text/event-stream")
         upstream = route["upstream"]
-
-        if not 200 <= upstream_response.status_code < 300:
-            body_read_started_at = time.perf_counter()
-            body = await upstream_response.aread()
-            await upstream_response.aclose()
-            logger.info(
-                "Gateway stream timing | session=%s route=%s upstream=%s model=%s upstream_model=%s "
-                "status=%s error_response=true header_ms=%s body_read_ms=%s total_ms=%s",
-                session_id,
-                "/v1/chat/completions",
-                upstream.get("name"),
-                model,
-                route["upstream_model"],
-                upstream_response.status_code,
-                upstream_headers_ms,
-                max(0, int((time.perf_counter() - body_read_started_at) * 1000)),
-                max(0, int((time.perf_counter() - stream_started_at) * 1000)),
-            )
-            return Response(
-                content=body,
-                status_code=upstream_response.status_code,
-                media_type=content_type,
-            )
 
         async def stream_body():
             finalized = False
@@ -3821,6 +3810,9 @@ class GatewayService:
             header_to_first_chunk_ms: int | None = None
             chunk_count = 0
             byte_count = 0
+            upstream_headers_ms = 0
+            upstream_status = 0
+            upstream_response: httpx.Response | None = None
 
             async def finalize_once() -> None:
                 nonlocal finalized
@@ -3839,34 +3831,103 @@ class GatewayService:
                 )
 
             try:
-                async for chunk in upstream_response.aiter_bytes():
-                    if chunk:
-                        chunk_count += 1
-                        byte_count += len(chunk)
-                        if first_chunk_ms is None:
-                            now = time.perf_counter()
-                            first_chunk_ms = max(0, int((now - stream_started_at) * 1000))
-                            header_to_first_chunk_ms = max(0, int((now - body_started_at) * 1000))
-                            logger.info(
-                                "Gateway stream first chunk | session=%s route=%s upstream=%s "
-                                "model=%s upstream_model=%s status=%s header_ms=%s "
-                                "first_chunk_ms=%s header_to_first_chunk_ms=%s",
-                                session_id,
-                                "/v1/chat/completions",
-                                upstream.get("name"),
-                                model,
-                                route["upstream_model"],
-                                upstream_response.status_code,
-                                upstream_headers_ms,
-                                first_chunk_ms,
-                                header_to_first_chunk_ms,
+                yield UPSTREAM_STREAM_KEEPALIVE
+                open_task = asyncio.create_task(self._open_upstream_stream(route, payload))
+                try:
+                    while not open_task.done():
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.shield(open_task),
+                                timeout=UPSTREAM_STREAM_KEEPALIVE_SECONDS,
                             )
-                        self._consume_stream_capture_chunk(stream_state, chunk)
-                        if stream_state.get("seen_done"):
-                            await finalize_once()
-                        yield chunk
+                        except asyncio.TimeoutError:
+                            yield UPSTREAM_STREAM_KEEPALIVE
+                    upstream_response = open_task.result()
+                except Exception:
+                    if not open_task.done():
+                        open_task.cancel()
+                    raise
+                upstream_headers_ms = max(0, int((time.perf_counter() - stream_started_at) * 1000))
+                upstream_status = int(upstream_response.status_code)
+
+                if not 200 <= upstream_status < 300:
+                    body = await upstream_response.aread()
+                    logger.info(
+                        "Gateway stream timing | session=%s route=%s upstream=%s model=%s "
+                        "upstream_model=%s status=%s error_response=true header_ms=%s total_ms=%s",
+                        session_id,
+                        "/v1/chat/completions",
+                        upstream.get("name"),
+                        model,
+                        route["upstream_model"],
+                        upstream_status,
+                        upstream_headers_ms,
+                        max(0, int((time.perf_counter() - stream_started_at) * 1000)),
+                    )
+                    yield self._sse_upstream_error_bytes(upstream_status, body)
+                    return
+
+                aiter = upstream_response.aiter_bytes()
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(
+                            aiter.__anext__(),
+                            timeout=UPSTREAM_STREAM_KEEPALIVE_SECONDS,
+                        )
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError:
+                        yield UPSTREAM_STREAM_KEEPALIVE
+                        continue
+                    if not chunk:
+                        continue
+                    chunk_count += 1
+                    byte_count += len(chunk)
+                    if first_chunk_ms is None:
+                        now = time.perf_counter()
+                        first_chunk_ms = max(0, int((now - stream_started_at) * 1000))
+                        header_to_first_chunk_ms = max(0, int((now - body_started_at) * 1000))
+                        logger.info(
+                            "Gateway stream first chunk | session=%s route=%s upstream=%s "
+                            "model=%s upstream_model=%s status=%s header_ms=%s "
+                            "first_chunk_ms=%s header_to_first_chunk_ms=%s",
+                            session_id,
+                            "/v1/chat/completions",
+                            upstream.get("name"),
+                            model,
+                            route["upstream_model"],
+                            upstream_status,
+                            upstream_headers_ms,
+                            first_chunk_ms,
+                            header_to_first_chunk_ms,
+                        )
+                    self._consume_stream_capture_chunk(stream_state, chunk)
+                    if stream_state.get("seen_done"):
+                        await finalize_once()
+                    yield chunk
                 self._consume_stream_capture_chunk(stream_state, b"", final=True)
                 await finalize_once()
+            except Exception as exc:
+                logger.warning(
+                    "Gateway stream failed | session=%s upstream=%s model=%s error=%s",
+                    session_id,
+                    upstream.get("name"),
+                    model,
+                    exc,
+                )
+                yield self._sse_upstream_error_bytes(
+                    502,
+                    json.dumps(
+                        {
+                            "error": {
+                                "message": f'Upstream "{upstream.get("name")}" request failed',
+                                "type": "upstream_error",
+                                "detail": str(exc),
+                            }
+                        },
+                        ensure_ascii=False,
+                    ).encode("utf-8"),
+                )
             finally:
                 logger.info(
                     "Gateway stream timing | session=%s route=%s upstream=%s model=%s upstream_model=%s "
@@ -3877,7 +3938,7 @@ class GatewayService:
                     upstream.get("name"),
                     model,
                     route["upstream_model"],
-                    upstream_response.status_code,
+                    upstream_status,
                     upstream_headers_ms,
                     first_chunk_ms,
                     header_to_first_chunk_ms,
@@ -3888,11 +3949,12 @@ class GatewayService:
                     finalized,
                     bool(stream_state.get("seen_done")),
                 )
-                await upstream_response.aclose()
+                if upstream_response is not None:
+                    await upstream_response.aclose()
 
         return StreamingResponse(
             stream_body(),
-            status_code=upstream_response.status_code,
+            status_code=200,
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -21280,6 +21342,30 @@ class GatewayService:
 
     def _should_retry_upstream_status(self, status_code: int) -> bool:
         return int(status_code) in RETRYABLE_UPSTREAM_STATUS_CODES
+
+    @staticmethod
+    def _sse_upstream_error_bytes(status_code: int, body: bytes) -> bytes:
+        text = body.decode("utf-8", errors="replace") if body else ""
+        parsed: Any = None
+        if text.strip():
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+        if isinstance(parsed, dict) and parsed:
+            payload = parsed
+        else:
+            payload = {
+                "error": {
+                    "message": text.strip() or f"Upstream HTTP {status_code}",
+                    "type": "upstream_error",
+                    "status": int(status_code),
+                }
+            }
+        return (
+            f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+            + b"data: [DONE]\n\n"
+        )
 
     def _upstream_request_error_response(
         self,
