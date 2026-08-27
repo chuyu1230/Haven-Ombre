@@ -747,6 +747,41 @@ def emotional_recall_terms(
     return _unique(terms)[:max_terms]
 
 
+_TIMESTAMP_FOCUS_RE = re.compile(
+    r"^\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}(?:[日号])?(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?$"
+)
+
+
+def _quoted_span_is_inside_markup_tag(text: str, quote_start: int) -> bool:
+    """Skip quotes that live inside XML/HTML tags (e.g. sent_at=\"...\")."""
+    before = str(text or "")[: max(0, int(quote_start))]
+    last_open = before.rfind("<")
+    last_close = before.rfind(">")
+    return last_open > last_close
+
+
+def _is_timestamp_like_focus(value: str) -> bool:
+    compact = re.sub(r"\s+", " ", str(value or "").strip())
+    if not compact:
+        return False
+    if _TIMESTAMP_FOCUS_RE.fullmatch(compact):
+        return True
+    # Compact form after _clean_recall_focus removes spaces: 2026-08-2714:08
+    return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}\d{1,2}:\d{2}(?::\d{2})?", compact))
+
+
+def _associative_quoted_focus(text: str) -> str:
+    """Pick human-quoted focus; ignore markup attribute quotes / bare timestamps."""
+    for match in re.finditer(r"[“\"'「『]([^”\"'」』]{1,32})[”\"'」』]", str(text or "")):
+        if _quoted_span_is_inside_markup_tag(text, match.start()):
+            continue
+        focus = _clean_recall_focus(match.group(1))
+        if not focus or _is_timestamp_like_focus(focus):
+            continue
+        return focus
+    return ""
+
+
 def recall_focus_query(
     query: str,
     options: MemoryRelevanceOptions | None = None,
@@ -762,11 +797,9 @@ def recall_focus_query(
     if not any(marker in text for marker in ASSOCIATIVE_PROMPT_MARKERS):
         return text
 
-    quoted = re.search(r"[“\"'「『]([^”\"'」』]{1,32})[”\"'」』]", text)
-    if quoted:
-        focus = _clean_recall_focus(quoted.group(1))
-        if focus:
-            return focus
+    quoted_focus = _associative_quoted_focus(text)
+    if quoted_focus:
+        return quoted_focus
 
     memory_match = re.search(
         r"(?:记得|记不记得|还记得)(?P<focus>.+?)(?:的)?(?:那次|这次|时候|事情|事)(?:吗|么|嘛)?",
@@ -1306,6 +1339,9 @@ def _clean_protected_phrase(value: Any, *, max_chars: int = PROTECTED_PHRASE_MAX
     if not phrase or "\n" in phrase:
         return ""
     if len(phrase) > max_chars:
+        return ""
+    # Client timestamps in quotes (sent_at="2026-08-27 14:08") are not memory topics.
+    if _is_timestamp_like_focus(phrase):
         return ""
     normalized = _normalize_alias(phrase)
     if normalized in ASSOCIATIVE_PROMPT_VAGUE_FOCUS:

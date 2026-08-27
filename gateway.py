@@ -304,6 +304,11 @@ RUNTIME_CLOCK_RE = re.compile(
     r"<runtime_clock\b[^>]*(?:/>|>[\s\S]*?</runtime_clock>)",
     re.IGNORECASE,
 )
+# Client trailing metadata (e.g. sent_at timestamps). Must not enter recall/date parsing.
+MESSAGE_META_RE = re.compile(
+    r"<message_meta\b[^>]*(?:/>|>[\s\S]*?</message_meta>)",
+    re.IGNORECASE,
+)
 WORKSPACE_ATTACHMENT_RE = re.compile(
     r"<workspace_attachment>[\s\S]*?</workspace_attachment>",
     re.IGNORECASE,
@@ -7330,6 +7335,7 @@ class GatewayService:
         cleaned = EXTERNAL_CONTEXT_ATTACHMENT_RE.sub("", cleaned)
         cleaned = SELF_CLOSING_ATTACHMENT_RE.sub("", cleaned)
         cleaned = RUNTIME_CLOCK_RE.sub("", cleaned)
+        cleaned = MESSAGE_META_RE.sub("", cleaned)
         cleaned = self._strip_leading_auto_context_markers(cleaned)
         return self._strip_external_context_blocks(cleaned)
 
