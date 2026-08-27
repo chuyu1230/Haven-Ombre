@@ -372,7 +372,7 @@ gateway:
   just_now_context_budget: 420
   conversation_turns_max_entries: 500
   memory_sentinel_enabled: true     # grey-zone routing: search | tone_only | skip; hard recall signals bypass it
-  domain_sentinel_enabled: true      # coarse routing: message_type, primary domain, optional should_recall=false
+  domain_sentinel_enabled: true      # coarse routing for domain/query rewrite; only auto_trigger/troubleshooting may skip recall
   domain_sentinel_model: ""          # empty = use dehydration.model; prefer cheap/fast models
   domain_sentinel_base_url: ""       # empty = reuse dehydration.base_url
   # domain_sentinel_api_key: ""      # empty = OMBRE_DOMAIN_SENTINEL_API_KEY or dehydration.api_key

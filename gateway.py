@@ -300,6 +300,10 @@ SELF_CLOSING_ATTACHMENT_RE = re.compile(
     r"<attachment\b[^>]*/>",
     re.IGNORECASE,
 )
+RUNTIME_CLOCK_RE = re.compile(
+    r"<runtime_clock\b[^>]*(?:/>|>[\s\S]*?</runtime_clock>)",
+    re.IGNORECASE,
+)
 WORKSPACE_ATTACHMENT_RE = re.compile(
     r"<workspace_attachment>[\s\S]*?</workspace_attachment>",
     re.IGNORECASE,
@@ -2754,14 +2758,14 @@ class GatewayService:
             mark_step("memory_sentinel", stage_started_at)
             sentinel_route = str(memory_sentinel_debug.get("route") or "")
             sentinel_skip_broad = sentinel_route in {"tone_only", "skip"}
-            sentinel_search = sentinel_route == "search"
+            # Prefer semantic search for natural chat. Do not let date_recall or
+            # low-signal heuristics monopolize / pre-empt broad dynamic recall.
+            # Domain sentinel may rewrite search queries but must not block ordinary chat.
             pre_domain_skip_broad = (
                 skip_for_targeted_detail
                 or needs_handoff_first
                 or just_now_context_requested
-                or date_recall_requested
                 or sentinel_skip_broad
-                or (low_signal_auto_recall and not sentinel_search)
             )
             domain_sentinel_skip_broad = False
             if not pre_domain_skip_broad:
@@ -2781,6 +2785,13 @@ class GatewayService:
             recall_plan_skip_reason = str(
                 (query_planner_debug.get("recall_query_plan") or {}).get("skip_reason") or ""
             )
+            if date_recall_requested:
+                stage_started_at = time.perf_counter()
+                date_recall, date_recall_debug, date_recall_bucket_ids = self._build_date_recall_context(
+                    current_user_query,
+                    all_buckets,
+                )
+                mark_step("date_recall", stage_started_at)
             if needs_handoff_first:
                 query_planner_debug["skip_reason"] = handoff_skip_reason
                 if is_session_start_handoff_query and not is_handoff_trigger_query:
@@ -2809,19 +2820,19 @@ class GatewayService:
                     current_user_query,
                 )
                 mark_step("just_now_context", stage_started_at)
-            elif date_recall_requested:
-                query_planner_debug["skip_reason"] = "date_recall"
-                stage_started_at = time.perf_counter()
-                date_recall, date_recall_debug, date_recall_bucket_ids = self._build_date_recall_context(
-                    current_user_query,
-                    all_buckets,
-                )
-                mark_step("date_recall", stage_started_at)
             elif sentinel_skip_broad:
                 query_planner_debug["skip_reason"] = f"memory_sentinel_{sentinel_route}"
             elif domain_sentinel_skip_broad:
                 query_planner_debug["skip_reason"] = "domain_sentinel_skip"
-            elif low_signal_auto_recall:
+            elif date_recall_requested and skip_broad_dynamic_recall:
+                query_planner_debug["skip_reason"] = "date_recall"
+            elif date_recall_requested and not skip_broad_dynamic_recall:
+                query_planner_debug["skip_reason"] = (
+                    "date_recall_with_semantic_fallback"
+                    if not str(date_recall or "").strip()
+                    else "date_recall_plus_semantic"
+                )
+            elif low_signal_auto_recall and skip_broad_dynamic_recall:
                 query_planner_debug["skip_reason"] = (
                     recall_plan_skip_reason
                     if recall_plan_skip_reason == "recall_meta_without_target"
@@ -2873,19 +2884,17 @@ class GatewayService:
                 channel="gateway",
             )
             mark_step("active_reminders", stage_started_at)
-            if not needs_handoff_first and not just_now_context_requested and not date_recall_requested and self._should_inject_interval(
+            if not needs_handoff_first and not just_now_context_requested and self._should_inject_interval(
                 session_id,
                 self.core_memory_interval_rounds,
             ):
                 stage_started_at = time.perf_counter()
                 core_memory = await self._build_core_memory_block(all_buckets)
                 mark_step("core_memory", stage_started_at)
-            if needs_handoff_first or just_now_context_requested or date_recall_requested:
+            if needs_handoff_first or just_now_context_requested:
                 portrait_memory_debug["skip_reason"] = (
                     "just_now_context"
                     if just_now_context_requested and not needs_handoff_first
-                    else "date_recall"
-                    if date_recall_requested and not needs_handoff_first
                     else handoff_skip_reason
                 )
             else:
@@ -3087,7 +3096,7 @@ class GatewayService:
                 )
             reliable_dynamic_context = bool(recalled_memory.strip() or related_memory.strip())
             memory_sentinel_blocks_context = str(memory_sentinel_debug.get("route") or "") in {"tone_only", "skip"}
-            if not memory_sentinel_blocks_context and not just_now_context_requested and not date_recall_requested and self._should_inject_recent_context(
+            if not memory_sentinel_blocks_context and not just_now_context_requested and self._should_inject_recent_context(
                 session_id,
                 current_user_query,
                 has_reliable_dynamic_context=reliable_dynamic_context,
@@ -7320,6 +7329,7 @@ class GatewayService:
         cleaned = WORKSPACE_ATTACHMENT_RE.sub("", str(text or ""))
         cleaned = EXTERNAL_CONTEXT_ATTACHMENT_RE.sub("", cleaned)
         cleaned = SELF_CLOSING_ATTACHMENT_RE.sub("", cleaned)
+        cleaned = RUNTIME_CLOCK_RE.sub("", cleaned)
         cleaned = self._strip_leading_auto_context_markers(cleaned)
         return self._strip_external_context_blocks(cleaned)
 
@@ -13365,9 +13375,10 @@ class GatewayService:
                         "message_type must be one of: auto_trigger, troubleshooting, recall_request, ordinary_chat, other. "
                         "primary_domain must be one of: relationship, intimacy, life, tech, project, general. "
                         "domains is optional but if present must use only those same domain keys. "
-                        "First decide whether the message is an automatic trigger/status payload or a troubleshooting/debugging message; if so set message_type accordingly and should_recall=false. "
-                        "For ordinary chat without a locatable memory need, set should_recall=false. "
-                        "For explicit recall, detail-read, date recall, or named-entity questions, set message_type=recall_request and should_recall=true. "
+                        "Only set should_recall=false for automatic trigger/status payloads or pure troubleshooting/debugging with no personal memory value. "
+                        "For ordinary chat, emotional sharing, affection, people, relationships, shared history, preferences, or past events, "
+                        "prefer should_recall=true so semantic memory search can decide relevance. "
+                        "Do not require an explicit 'do you remember' request. "
                         "Use intimacy only for clearly intimate/body/desire content; otherwise use relationship for relationship anchors, signals, symbols, and communication."
                     ),
                 },
@@ -13489,9 +13500,14 @@ class GatewayService:
         return "other"
 
     def _domain_sentinel_should_skip_recall(self, debug: dict[str, Any] | None, query: str = "") -> bool:
+        """Only hard-skip non-chat payloads. Never block ordinary natural chat before semantic search."""
         if not isinstance(debug, dict):
             return False
         if query and self._domain_sentinel_query_explicitly_needs_memory(query):
+            return False
+        message_type = str(debug.get("message_type") or "").strip().lower()
+        # Ordinary emotional chat / people / history must reach broad semantic recall.
+        if message_type not in {"auto_trigger", "troubleshooting"}:
             return False
         if debug.get("should_recall") is not False:
             return False
