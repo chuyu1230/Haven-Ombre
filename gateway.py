@@ -12408,9 +12408,31 @@ class GatewayService:
             return " ".join(entity_terms[:4])
         return self._normalized_recall_query(query)
 
+    def _locatable_search_terms(self, query: str) -> list[str]:
+        """Person/place anchors for search; skip vocative 哥哥/identity address."""
+        address_keys = {
+            self._compact_lookup_key(term)
+            for term in identity_address_terms(self.identity)
+            if self._compact_lookup_key(term)
+        }
+        output: list[str] = []
+        seen: set[str] = set()
+        for term in self._locatable_query_terms(query):
+            key = self._compact_lookup_key(term)
+            if not key or key in seen or key in address_keys:
+                continue
+            if len(key) < 2:
+                continue
+            seen.add(key)
+            output.append(str(term).strip())
+        return output
+
     def _dynamic_recall_search_query(self, query: str, sentinel_debug: dict[str, Any] | None = None) -> str:
+        locatable_terms = self._locatable_search_terms(query)
         identity_name_terms = self._identity_name_search_terms(query)
-        if identity_name_terms:
+        if locatable_terms:
+            base = " ".join(locatable_terms[:6])
+        elif identity_name_terms:
             base = " ".join(identity_name_terms[:8])
         else:
             residue_terms = self._memory_sentinel_searchable_residue_terms(query)
@@ -16276,6 +16298,25 @@ class GatewayService:
         )
         return key not in generic_keys
 
+    def _bucket_locatable_term_hits(self, query: str, bucket: dict) -> list[str]:
+        if not query or not isinstance(bucket, dict):
+            return []
+        text_key = self._compact_lookup_key(
+            self._axis_lite_node_text(bucket) or self._date_recall_bucket_text(bucket)
+        )
+        if not text_key:
+            return []
+        hits: list[str] = []
+        seen: set[str] = set()
+        for term in self._locatable_search_terms(query):
+            key = self._compact_lookup_key(term)
+            if not key or key in seen:
+                continue
+            if key in text_key:
+                hits.append(term)
+                seen.add(key)
+        return hits
+
     def _bucket_title_anchor_terms(self, query: str, bucket: dict) -> list[str]:
         if not query or not isinstance(bucket, dict):
             return []
@@ -16286,7 +16327,12 @@ class GatewayService:
         output: list[str] = []
         for term in self._dynamic_anchor_query_terms(query):
             key = self._compact_lookup_key(term)
-            if not key or len(key) < 3 or self._dynamic_anchor_term_is_category(term):
+            if not key or self._dynamic_anchor_term_is_category(term):
+                continue
+            # 2-char CJK locatable terms (妹妹/妈妈) are valid title anchors.
+            if len(key) < 2:
+                continue
+            if not re.search(r"[\u4e00-\u9fff]", key) and len(key) < 3 and not re.search(r"\d", key):
                 continue
             if key in title_key and term not in output:
                 output.append(term)
@@ -16295,8 +16341,9 @@ class GatewayService:
         for fragment in re.split(r"[与和及、/|：:—-]+", title):
             cleaned = fragment.strip()
             key = self._compact_lookup_key(cleaned)
+            min_len = 2 if re.search(r"[\u4e00-\u9fff]", key) else 4
             if (
-                len(key) >= 4
+                len(key) >= min_len
                 and key in query_key
                 and not self._dynamic_anchor_term_is_category(cleaned)
                 and cleaned not in output
@@ -16325,6 +16372,10 @@ class GatewayService:
         if title_anchor_terms:
             item["title_anchor_terms"] = title_anchor_terms
             labels.append("title_anchor")
+        locatable_hits = self._bucket_locatable_term_hits(query, bucket)
+        if locatable_hits:
+            item["locatable_term_hits"] = locatable_hits
+            labels.append("keyword_match")
         if item.get("exact_anchor_match") or self._safe_float(item.get("exact_anchor_score"), 0.0) > 0:
             labels.append("exact_anchor")
         protected_phrases = extract_protected_phrases(query)
