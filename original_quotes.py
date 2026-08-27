@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 ORIGINAL_QUOTE_KIND = "original_quote"
 ORIGINAL_QUOTE_TAG = "original_quote"
 ORIGINAL_QUOTE_SOURCE = "original_quote"
+_ORIGINAL_HEADING_RE = re.compile(r"(?im)^\s*#{1,6}\s*original\b")
 
 
 def format_original_quote_content(
@@ -30,6 +32,13 @@ def format_original_quote_content(
     return "\n".join(parts).strip()
 
 
+def looks_like_original_quote_text(*parts: str) -> bool:
+    blob = "\n".join(str(part or "") for part in parts)
+    if "原话" in blob or ORIGINAL_QUOTE_TAG in blob.lower():
+        return True
+    return bool(_ORIGINAL_HEADING_RE.search(blob))
+
+
 def is_original_quote_bucket(bucket: dict[str, Any] | None) -> bool:
     if not isinstance(bucket, dict):
         return False
@@ -41,9 +50,12 @@ def is_original_quote_bucket(bucket: dict[str, Any] | None) -> bool:
         for tag in (meta.get("tags") or [])
         if str(tag or "").strip()
     }
+    name = str(meta.get("name") or bucket.get("name") or "")
+    content = str(bucket.get("content") or "")
     return (
         kind == ORIGINAL_QUOTE_KIND
         or source == ORIGINAL_QUOTE_SOURCE
         or ORIGINAL_QUOTE_TAG in tags
         or "原话" in tags
+        or looks_like_original_quote_text(name, content, " ".join(sorted(tags)))
     )

@@ -81,6 +81,7 @@ from original_quotes import (
     ORIGINAL_QUOTE_TAG,
     format_original_quote_content,
     is_original_quote_bucket,
+    looks_like_original_quote_text,
 )
 from identity_semantics import IdentitySemanticStore
 from import_memory import ImportEngine
@@ -2340,9 +2341,11 @@ async def _auto_generate_write_moment_if_needed(
     self_anchor: object = False,
     domain: list | tuple | set | str | None = None,
 ) -> str:
-    _ = tags
+    raw = str(content or "").strip()
+    if looks_like_original_quote_text(raw, " ".join(str(tag or "") for tag in (tags or []))):
+        return raw
     if _is_self_anchor_write_content(self_anchor, domain):
-        return str(content or "").strip()
+        return raw
     return await _auto_generate_moment_if_missing(content)
 
 
@@ -4038,6 +4041,8 @@ async def _merge_or_create(
     memory_layer: str = "",
     memory_classification_source: str = "",
     date: str = "",
+    source: str | None = None,
+    extra_metadata: dict | None = None,
 ) -> tuple[str, str, bool, dict | None]:
     """
     Check if a similar bucket exists for merging; merge if so, create if not.
@@ -4090,6 +4095,14 @@ async def _merge_or_create(
             except Exception as e:
                 logger.warning(f"Merge failed, creating new / 合并失败，新建: {e}")
 
+    merged_extra = {
+        **_memory_classification_metadata(
+            memory_subject,
+            memory_layer,
+            memory_classification_source,
+        ),
+        **(extra_metadata or {}),
+    }
     bucket_id = await bucket_mgr.create(
         content=content,
         tags=tags,
@@ -4099,11 +4112,8 @@ async def _merge_or_create(
         arousal=arousal,
         name=name or None,
         date=date or None,
-        extra_metadata=_memory_classification_metadata(
-            memory_subject,
-            memory_layer,
-            memory_classification_source,
-        ),
+        source=source,
+        extra_metadata=merged_extra or None,
     )
     _queue_embedding_refresh(bucket_id)
     return bucket_id, name or bucket_id, False, related_bucket
@@ -8259,7 +8269,7 @@ async def hold(
     date: str = "",
     domain: str = "",
 ) -> str:
-    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。date 可传事件日期；title 可选，传了就用给定标题，不传则自动生成。普通记忆不用填写 domain，系统会自动判断；维护自我锚点等特殊桶时可显式传 domain。显式 valence/arousal 会覆盖自动情绪。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection；reflection 必须写成“我……”第一人称。不要写 ### affect_anchor、### followup 或 ### todo：长期回应变化写进 reflection，到时提醒用 reminder_create。feel=True/whisper=True 时 content 只能写第一人称正文，不写标题或任何 Markdown 分段。"""
+    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。要留当时原句时也用 hold：title 带「原话」，正文用 ### original，下面两行分别写阿钰原句和小羽原句，不要改写、不要用 grow。相近话题时系统会原样召回，由现在的你再决定怎么答，不是命令复读。date 可传事件日期；title 可选，传了就用给定标题，不传则自动生成。普通记忆不用填写 domain，系统会自动判断；维护自我锚点等特殊桶时可显式传 domain。显式 valence/arousal 会覆盖自动情绪。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection；reflection 必须写成“我……”第一人称。不要写 ### affect_anchor、### followup 或 ### todo：长期回应变化写进 reflection，到时提醒用 reminder_create。feel=True/whisper=True 时 content 只能写第一人称正文，不写标题或任何 Markdown 分段。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -8351,7 +8361,17 @@ async def hold(
     suggested_name = title.strip() or analysis.get("suggested_name", "")
 
     all_tags = list(dict.fromkeys(auto_tags + extra_tags))
+    is_original_quote = looks_like_original_quote_text(
+        content, suggested_name, " ".join(all_tags)
+    )
+    if is_original_quote:
+        if ORIGINAL_QUOTE_TAG not in all_tags:
+            all_tags.append(ORIGINAL_QUOTE_TAG)
+        if "原话" not in all_tags:
+            all_tags.append("原话")
     content = await _auto_generate_write_moment_if_needed(content, all_tags, domain=domain)
+    quote_extra = {"kind": ORIGINAL_QUOTE_KIND} if is_original_quote else {}
+    quote_source = ORIGINAL_QUOTE_SOURCE if is_original_quote else None
     classification = normalize_write_classification(
         memory_subject=analysis.get("memory_subject", ""),
         memory_layer=analysis.get("memory_layer", ""),
@@ -8376,11 +8396,16 @@ async def hold(
             bucket_type="permanent",
             pinned=True,
             date=event_date or None,
-            extra_metadata=_memory_classification_metadata(
-                classification["memory_subject"],
-                classification["memory_layer"],
-                classification["memory_classification_source"],
-            ),
+            source=quote_source,
+            extra_metadata={
+                **_memory_classification_metadata(
+                    classification["memory_subject"],
+                    classification["memory_layer"],
+                    classification["memory_classification_source"],
+                ),
+                **quote_extra,
+            }
+            or None,
         )
         _queue_embedding_refresh(bucket_id)
         _queue_memory_enrichment(bucket_id)
@@ -8401,6 +8426,8 @@ async def hold(
         memory_layer=classification["memory_layer"],
         memory_classification_source=classification["memory_classification_source"],
         date=event_date,
+        source=quote_source,
+        extra_metadata=quote_extra or None,
     )
     _queue_memory_enrichment(bucket_id)
 
