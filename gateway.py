@@ -129,9 +129,6 @@ FAVORITE_MEMORY_MARKER = "[[ombre:favorite]]"
 RETRYABLE_UPSTREAM_STATUS_CODES = {401, 403, 429, 500, 502, 503, 504}
 UPSTREAM_STREAM_KEEPALIVE = b": ombre-keepalive\n\n"
 UPSTREAM_STREAM_KEEPALIVE_SECONDS = 12.0
-GATEWAY_UPSTREAM_MODEL_ALIASES = {
-    "deepseek-v4-flash": "deepseek-ai/DeepSeek-V4-Flash",
-}
 DUPLICATE_CONVERSATION_TURN_WINDOW_SECONDS = 120
 DOMAIN_SENTINEL_ALLOWED_DOMAINS = frozenset(
     {
@@ -21387,10 +21384,25 @@ class GatewayService:
             add(default_model, default_model)
         return models, model_map
 
+    @staticmethod
+    def _sanitize_upstream_thinking(payload: dict) -> None:
+        thinking = payload.get("thinking")
+        if thinking is None:
+            return
+        if not isinstance(thinking, dict):
+            payload.pop("thinking", None)
+            return
+        thinking_type = str(thinking.get("type") or "").strip().lower()
+        if thinking_type in {"enabled", "disabled"}:
+            payload["thinking"] = {"type": thinking_type}
+            return
+        payload["thinking"] = {"type": "disabled"}
+
     def _payload_for_upstream_model(self, payload: dict, upstream_model: str) -> dict:
         upstream_payload = deepcopy(payload)
         upstream_payload["model"] = upstream_model
         upstream_payload.pop("_ombre_anthropic_thinking", None)
+        self._sanitize_upstream_thinking(upstream_payload)
         messages = upstream_payload.get("messages")
         if isinstance(messages, list):
             for message in messages:
@@ -21619,9 +21631,6 @@ class GatewayService:
             if not normalized_model:
                 raise ValueError("model is required when gateway has multiple upstreams")
             lookup_models = [normalized_model]
-            aliased_model = GATEWAY_UPSTREAM_MODEL_ALIASES.get(normalized_model)
-            if aliased_model and aliased_model not in lookup_models:
-                lookup_models.append(aliased_model)
             upstream = next(
                 (
                     candidate
@@ -21635,8 +21644,6 @@ class GatewayService:
             model_map = upstream.get("model_map", {})
             mapped_model = next((name for name in lookup_models if name in model_map), normalized_model)
             upstream_model = model_map.get(mapped_model, mapped_model)
-
-        upstream_model = GATEWAY_UPSTREAM_MODEL_ALIASES.get(upstream_model, upstream_model)
 
         if not upstream.get("base_url"):
             raise RuntimeError(f'gateway upstream "{upstream["name"]}" base_url is not configured')
