@@ -55,6 +55,10 @@ from memory_relevance import (
     relevance_multiplier,
 )
 from original_quotes import is_original_quote_bucket
+from proactive_outbound import (
+    is_proactive_outbound_query,
+    select_outbound_topic_buckets,
+)
 from query_prompts import QUERY_PLANNER_SYSTEM_PROMPT
 from query_understanding import (
     query_intent_rules,
@@ -2772,6 +2776,12 @@ class GatewayService:
         domain_sentinel_debug: dict[str, Any] = self._domain_sentinel_rule_plan(current_user_query)
         skip_broad_dynamic_recall = False
         date_persona_trace_requested = False
+        outbound_topic_memory = ""
+        outbound_topic_bucket_ids: list[str] = []
+        outbound_topic_debug: dict[str, Any] = {
+            "enabled": bool(proactive_outbound),
+            "selected_ids": [],
+        }
 
         if is_new_user_turn:
             stage_started_at = time.perf_counter()
@@ -2780,54 +2790,64 @@ class GatewayService:
                 session_id,
             )
             mark_step("targeted_skip_check", stage_started_at)
-            stage_started_at = time.perf_counter()
-            memory_sentinel_debug = await self._route_memory_sentinel(
-                current_user_query,
-                session_id,
-                all_buckets,
-                needs_handoff_first=needs_handoff_first,
-                just_now_context_requested=just_now_context_requested,
-                date_recall_requested=date_recall_requested,
-                targeted_detail_skip=skip_for_targeted_detail,
-            )
-            mark_step("memory_sentinel", stage_started_at)
-            sentinel_route = str(memory_sentinel_debug.get("route") or "")
-            sentinel_skip_broad = sentinel_route in {"tone_only", "skip"}
-            # Prefer semantic search for natural chat. Do not let date_recall or
-            # low-signal heuristics monopolize / pre-empt broad dynamic recall.
-            # Domain sentinel may rewrite search queries but must not block ordinary chat.
-            pre_domain_skip_broad = (
-                skip_for_targeted_detail
-                or needs_handoff_first
-                or just_now_context_requested
-                or sentinel_skip_broad
-            )
+            sentinel_skip_broad = False
+            sentinel_route = ""
             domain_sentinel_skip_broad = False
-            if not pre_domain_skip_broad:
+            if proactive_outbound:
+                skip_broad_dynamic_recall = True
+                query_planner_debug["skip_reason"] = "proactive_outbound_surface"
+                mark_step("memory_sentinel", time.perf_counter())
+            else:
                 stage_started_at = time.perf_counter()
-                domain_sentinel_debug = await self._route_domain_sentinel(current_user_query)
-                mark_step("domain_sentinel", stage_started_at)
-                domain_sentinel_skip_broad = self._domain_sentinel_should_skip_recall(
-                    domain_sentinel_debug,
+                memory_sentinel_debug = await self._route_memory_sentinel(
                     current_user_query,
+                    session_id,
+                    all_buckets,
+                    needs_handoff_first=needs_handoff_first,
+                    just_now_context_requested=just_now_context_requested,
+                    date_recall_requested=date_recall_requested,
+                    targeted_detail_skip=skip_for_targeted_detail,
                 )
-            if domain_sentinel_skip_broad:
-                domain_sentinel_debug["skip_applied"] = True
-            skip_broad_dynamic_recall = (
-                pre_domain_skip_broad
-                or domain_sentinel_skip_broad
-            )
+                mark_step("memory_sentinel", stage_started_at)
+                sentinel_route = str(memory_sentinel_debug.get("route") or "")
+                sentinel_skip_broad = sentinel_route in {"tone_only", "skip"}
+                # Prefer semantic search for natural chat. Do not let date_recall or
+                # low-signal heuristics monopolize / pre-empt broad dynamic recall.
+                # Domain sentinel may rewrite search queries but must not block ordinary chat.
+                pre_domain_skip_broad = (
+                    skip_for_targeted_detail
+                    or needs_handoff_first
+                    or just_now_context_requested
+                    or sentinel_skip_broad
+                )
+                domain_sentinel_skip_broad = False
+                if not pre_domain_skip_broad:
+                    stage_started_at = time.perf_counter()
+                    domain_sentinel_debug = await self._route_domain_sentinel(current_user_query)
+                    mark_step("domain_sentinel", stage_started_at)
+                    domain_sentinel_skip_broad = self._domain_sentinel_should_skip_recall(
+                        domain_sentinel_debug,
+                        current_user_query,
+                    )
+                if domain_sentinel_skip_broad:
+                    domain_sentinel_debug["skip_applied"] = True
+                skip_broad_dynamic_recall = (
+                    pre_domain_skip_broad
+                    or domain_sentinel_skip_broad
+                )
             recall_plan_skip_reason = str(
                 (query_planner_debug.get("recall_query_plan") or {}).get("skip_reason") or ""
             )
-            if date_recall_requested:
+            if date_recall_requested and not proactive_outbound:
                 stage_started_at = time.perf_counter()
                 date_recall, date_recall_debug, date_recall_bucket_ids = self._build_date_recall_context(
                     current_user_query,
                     all_buckets,
                 )
                 mark_step("date_recall", stage_started_at)
-            if needs_handoff_first:
+            if proactive_outbound:
+                query_planner_debug["skip_reason"] = "proactive_outbound_surface"
+            elif needs_handoff_first:
                 query_planner_debug["skip_reason"] = handoff_skip_reason
                 if is_session_start_handoff_query and not is_handoff_trigger_query:
                     handoff_tool_hint = (
@@ -2919,7 +2939,11 @@ class GatewayService:
                 channel="gateway",
             )
             mark_step("active_reminders", stage_started_at)
-            if not needs_handoff_first and not just_now_context_requested and self._should_inject_interval(
+            if (
+                not needs_handoff_first
+                and not just_now_context_requested
+                and not proactive_outbound
+                and self._should_inject_interval(
                 session_id,
                 self.core_memory_interval_rounds,
             ):
@@ -2936,6 +2960,13 @@ class GatewayService:
                 stage_started_at = time.perf_counter()
                 portrait_memory, portrait_memory_debug = self._build_portrait_memory_block(all_buckets)
                 mark_step("portrait_memory", stage_started_at)
+            if proactive_outbound:
+                stage_started_at = time.perf_counter()
+                outbound_topic_memory, outbound_topic_bucket_ids, outbound_topic_debug = (
+                    await self._build_proactive_outbound_topic_block(session_id, all_buckets)
+                )
+                mark_step("proactive_outbound_topics", stage_started_at)
+                query_planner_debug["outbound_topic_ids"] = list(outbound_topic_bucket_ids)
             if self.recalled_budget > 0 or self.related_memory_budget > 0:
                 if skip_broad_dynamic_recall:
                     logger.info(
@@ -3026,7 +3057,10 @@ class GatewayService:
                 context_mode=context_mode,
             )
             mark_step("format_recalled_memory", stage_started_at)
-            date_persona_trace_requested = self._query_requests_date_persona_trace(current_user_query)
+            date_persona_trace_requested = (
+                not proactive_outbound
+                and self._query_requests_date_persona_trace(current_user_query)
+            )
             if needs_handoff_first or just_now_context_requested:
                 date_persona_trace_debug["skip_reason"] = (
                     "just_now_context"
@@ -3046,14 +3080,20 @@ class GatewayService:
                     all_buckets,
                 )
                 mark_step("date_persona_trace", stage_started_at)
-            if self._should_inject_interval(session_id, self.relationship_weather_interval_rounds):
+            if (
+                not proactive_outbound
+                and self._should_inject_interval(session_id, self.relationship_weather_interval_rounds)
+            ):
                 stage_started_at = time.perf_counter()
                 relationship_weather = await self._build_relationship_weather_block(all_buckets)
                 mark_step("relationship_weather", stage_started_at)
             if (
-                include_favorite_memory
-                or self._query_requests_favorite_memory(current_user_query)
-                or self._should_inject_interval(session_id, self.favorite_memory_interval_rounds)
+                not proactive_outbound
+                and (
+                    include_favorite_memory
+                    or self._query_requests_favorite_memory(current_user_query)
+                    or self._should_inject_interval(session_id, self.favorite_memory_interval_rounds)
+                )
             ):
                 stage_started_at = time.perf_counter()
                 favorite_memory, favorite_ids = await self._build_favorite_memory_block(all_buckets, session_id)
@@ -3169,6 +3209,7 @@ class GatewayService:
             if (
                 not just_now_context_requested
                 and not needs_handoff_first
+                and not proactive_outbound
                 and not self.recall_policy.is_daily_status_only_query(current_user_query)
             ):
                 stage_started_at = time.perf_counter()
@@ -3209,6 +3250,7 @@ class GatewayService:
                     + shown_targeted_detail_bucket_ids
                     + shown_dream_source_bucket_ids
                     + original_quote_bucket_ids
+                    + outbound_topic_bucket_ids
                 )
             )
             mark_step("injected_id_collection", stage_started_at)
@@ -3240,6 +3282,7 @@ class GatewayService:
             handoff_tool_hint=handoff_tool_hint,
             context_mode=context_mode,
             proactive_outbound_hint=proactive_outbound_hint,
+            outbound_topic_memory=outbound_topic_memory,
         )
         mark_step("build_context_messages", stage_started_at)
 
@@ -3359,6 +3402,7 @@ class GatewayService:
             "query_planner_triggered": bool(query_planner_debug.get("triggered")),
             "query_planner_skip_reason": str(query_planner_debug.get("skip_reason") or ""),
             "proactive_outbound": proactive_outbound,
+            "outbound_topic_ids": list(outbound_topic_bucket_ids),
             "operit_context_rewrite": operit_context_rewrite_debug,
             "active_reminder_ids": active_reminder_ids,
         }
@@ -3366,7 +3410,7 @@ class GatewayService:
         def log_prepare_timing() -> None:
             logger.info(
                 "Gateway prepare timing | session=%s model=%s stream=%s total_ms=%s "
-                "query_chars=%s messages=%s buckets=%s recalled=%s diffused=%s "
+                "query_chars=%s messages=%s buckets=%s recalled=%s outbound=%s diffused=%s "
                 "date_recall=%s date_trace=%s planner=%s planner_skip=%s steps_ms=%s",
                 session_id,
                 model,
@@ -3376,6 +3420,7 @@ class GatewayService:
                 len(messages),
                 len(all_buckets),
                 len(recalled_moments),
+                ",".join(outbound_topic_bucket_ids) or "-",
                 len(diffused_moment_debug),
                 date_recall_requested,
                 date_persona_trace_requested,
@@ -8769,22 +8814,36 @@ class GatewayService:
         return any(phrase in text for phrase in explicit_phrases)
 
     def _query_is_proactive_outbound(self, query: str) -> bool:
-        text = str(query or "")
-        if not text:
-            return False
-        required = query_intent_terms("proactive_outbound.required_markers")
-        if len(required) < 2:
-            required = ("小羽主动找阿钰发消息", "禁止回复上一个问题")
-        return all(marker in text for marker in required)
+        return is_proactive_outbound_query(query)
 
     @staticmethod
     def _proactive_outbound_instruction() -> str:
         return (
             "本轮是你（小羽）主动找阿钰，不是阿钰在向你提问。"
-            "禁止回答、续写或复制上一条对话里的问题，也禁止复制你上一次的回答。"
-            "自己开口：可以想她现在在做什么、回想以前没讲完的事、问她新的事，或只说你的心情和感受。"
+            "禁止回答、续写或复制窗口里刚刚聊过的内容，也禁止复制你上一次的回答。"
+            "若有 Outbound Topic Seeds：优先用这些感情/关系或钉选记忆开一个新话题，"
+            "可以接着以前没讲完的事，或问她以后的事；不要只重复种子原文。"
+            "没有种子时，只说此刻的心情或一个新鲜感受。"
             "不要问吃没吃饭、醒了没这类日常。"
         )
+
+    async def _build_proactive_outbound_topic_block(
+        self,
+        session_id: str,
+        all_buckets: list[dict],
+    ) -> tuple[str, list[str], dict[str, Any]]:
+        selected, debug = select_outbound_topic_buckets(
+            all_buckets,
+            last_injected_at=lambda bucket_id: self.state_store.get_last_injected_at(
+                session_id, bucket_id
+            ),
+            cooldown_hours=max(self.cooldown_hours, 12.0),
+            limit=2,
+        )
+        text = await self._summarize_buckets(selected, min(max(self.recalled_budget, 280), 520))
+        ids = [str(bucket.get("id") or "") for bucket in selected if bucket.get("id")]
+        debug["injected"] = bool(str(text or "").strip())
+        return text, ids, debug
 
     @staticmethod
     def _query_requests_just_now_context(query: str) -> bool:
@@ -18098,6 +18157,7 @@ class GatewayService:
         date_persona_trace: str = "",
         date_recall: str = "",
         proactive_outbound_hint: str = "",
+        outbound_topic_memory: str = "",
     ) -> tuple[str, str]:
         has_dynamic_context = any(
             section.strip()
@@ -18120,6 +18180,7 @@ class GatewayService:
                 active_reminders,
                 context_mode,
                 proactive_outbound_hint,
+                outbound_topic_memory,
             ]
         )
         has_memory_reading_context = any(
@@ -18135,6 +18196,7 @@ class GatewayService:
                 targeted_memory_detail,
                 related_memory,
                 dream_context,
+                outbound_topic_memory,
             ]
         )
         stable_sections = []
@@ -18195,6 +18257,7 @@ class GatewayService:
             )
             add_section(favorite_title, favorite_memory)
             add_section("Dream Context", dream_context)
+            add_section("Outbound Topic Seeds", outbound_topic_memory)
             add_section("Outbound Turn", proactive_outbound_hint)
 
         stable_context = "\n".join(stable_sections).strip()
