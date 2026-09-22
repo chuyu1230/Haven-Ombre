@@ -198,9 +198,9 @@ DAILY_CHAT_MEMORY_PROMPT_TEMPLATE = """这是 {user_display_name} 和 {ai_name} 
 - speaker 写「{user_display_name}」或「{ai_name}」。没有特别动人的句子就留空，不要为了凑数硬摘。
 
 称呼与文风：
-- 用户统一称为「阿钰」，AI统一称为「小羽」。
-- title、content、reason 等自然语言正文中，不要使用「用户」「AI」作为人物称呼。
-- 记忆不要写成冷冰冰的系统报告。尽量保留阿钰和小羽之间原本的语气、关系、情绪和有意义的互动，让记忆读起来像是在记录真实发生过的事情，而不是机械总结。
+- 用户统一称为「{user_display_name}」，回应者统一称为「{ai_name}」。
+- title、content、reason、quotes.speaker 里严禁写「用户」「AI」「assistant」「助手」；quotes 的 speaker 只能是「{user_display_name}」或「{ai_name}」。
+- 记忆不要写成冷冰冰的系统报告。尽量保留两人之间原本的语气、关系、情绪和有意义的互动，让记忆读起来像是在记录真实发生过的事情，而不是机械总结。
 - 如果原聊天中有自然的称呼、情绪、互动细节，可以适当保留，让记忆有温度、有连续感。
 - 绝对不能为了增加温度而虚构聊天中没有发生的事情、夸大情绪或改变原意。
 
@@ -259,7 +259,7 @@ DAILY_CHAT_MEMORY_SUMMARY_PROMPT_TEMPLATE = """你是 {ai_name} 的对话压缩�
 }
 
 规则：
-- 用户统一称为「阿钰」，AI统一称为「小羽」。title、summary、reason 等自然语言正文中，不要使用「用户」「AI」作为人物称呼。
+- 用户统一称为「{user_display_name}」，回应者统一称为「{ai_name}」。title、summary、quotes.speaker 里严禁写「用户」「AI」「assistant」「助手」。
 - 摘要不要写成冷冰冰的系统报告。尽量保留阿钰和小羽之间原本的语气、关系、情绪和有意义的互动，让摘要读起来像是在记录真实发生过的事情，而不是机械总结。
 - 如果原聊天中有自然的称呼、情绪、互动细节，可以适当保留，让摘要有温度、有连续感。
 - 绝对不能为了增加温度而虚构聊天中没有发生的事情、夸大情绪或改变原意。
@@ -3165,18 +3165,35 @@ class ReflectionEngine:
             if candidate.get("should_write") is False:
                 continue
             candidate_tags = self._string_list(candidate.get("tags"), limit=8)
-            narrative, _model_quote_lines = self._daily_chat_memory_split_quote_lines(
-                self._strip_memory_source_shell(strip_wikilinks(str(candidate.get("content") or "")).strip())
+            raw_content = self._strip_memory_source_shell(
+                strip_wikilinks(str(candidate.get("content") or "")).strip()
             )
-            if not narrative:
+            embedded_quotes = self._daily_chat_memory_extract_embedded_quotes(raw_content)
+            quotes = self._daily_chat_memory_verified_quotes(
+                [*list(candidate.get("quotes") or []), *embedded_quotes],
+                turns,
+            )
+            if quotes:
+                narrative = self._daily_chat_memory_rewrite_speakers(
+                    self._daily_chat_memory_strip_quote_texts(raw_content, quotes)
+                )
+                if not narrative:
+                    narrative = self._daily_chat_memory_rewrite_speakers(raw_content)
+                content = self._daily_chat_memory_rewrite_speakers(
+                    self._daily_chat_memory_compose_content(
+                        narrative,
+                        [self._daily_chat_memory_quote_line(quote) for quote in quotes],
+                    )
+                )
+            else:
+                content = self._daily_chat_memory_rewrite_speakers(raw_content)
+                narrative, _quote_lines = self._daily_chat_memory_split_quote_lines(content)
+            if not narrative and not content:
                 continue
+            if not narrative:
+                narrative = content
             if self._daily_chat_memory_noise(narrative):
                 continue
-            quotes = self._daily_chat_memory_verified_quotes(candidate.get("quotes"), turns)
-            content = self._daily_chat_memory_compose_content(
-                narrative,
-                [self._daily_chat_memory_quote_line(quote) for quote in quotes],
-            )
             kind = self._normalize_auto_memory_kind(
                 candidate.get("kind"),
                 content=narrative,
@@ -3472,6 +3489,12 @@ class ReflectionEngine:
                 item["reject_reason"] = reject_reason
                 changed = True
                 continue
+            rewritten = self._daily_chat_memory_rewrite_speakers(content)
+            if rewritten != content:
+                candidate = dict(candidate)
+                candidate["content"] = rewritten
+                item["candidate"] = candidate
+                changed = True
             kept_candidates.append(candidate)
         return refreshed, changed
 
@@ -3815,7 +3838,9 @@ class ReflectionEngine:
         return normalized[:500].rstrip() + "..."
 
     def _trim_daily_chat_memory_content(self, content: str) -> str:
-        normalized = self._strip_memory_source_shell(re.sub(r"\n{3,}", "\n\n", strip_wikilinks(content).strip()))
+        normalized = self._daily_chat_memory_rewrite_speakers(
+            self._strip_memory_source_shell(re.sub(r"\n{3,}", "\n\n", strip_wikilinks(content).strip()))
+        )
         if len(normalized) <= DAILY_CHAT_MEMORY_CONTENT_MAX_CHARS:
             return normalized
         narrative, quote_lines = self._daily_chat_memory_split_quote_lines(normalized)
@@ -3828,21 +3853,103 @@ class ReflectionEngine:
         ]
         return [name for name in dict.fromkeys(names) if name]
 
+    def _daily_chat_memory_quote_label_pattern(self) -> str:
+        labels = [
+            *self._daily_chat_memory_quote_speakers(),
+            "AI",
+            "助手",
+            "assistant",
+            "Assistant",
+            "用户",
+            "user",
+            "User",
+        ]
+        return "|".join(re.escape(label) for label in dict.fromkeys(labels) if label)
+
+    def _daily_chat_memory_rewrite_speakers(self, text: str) -> str:
+        content = str(text or "")
+        if not content:
+            return ""
+        user_name = str(self.identity.get("user_display_name") or "").strip()
+        ai_name = str(self.identity.get("ai_name") or "").strip()
+        if ai_name and ai_name != "AI":
+            content = re.sub(
+                r"(?<![A-Za-z\u4e00-\u9fff])(?:AI|助手|assistant)\s*([:：])",
+                lambda match: f"{ai_name}{match.group(1)}",
+                content,
+                flags=re.I,
+            )
+            content = re.sub(r"(?<![A-Za-z])AI(?![A-Za-z])", ai_name, content)
+            content = re.sub(r"(?<![A-Za-z\u4e00-\u9fff])(?:助手|assistant)(?![A-Za-z])", ai_name, content, flags=re.I)
+        if user_name and user_name not in {"用户", "user", "User"}:
+            content = re.sub(
+                r"(?<![A-Za-z\u4e00-\u9fff])(?:用户|user)\s*([:：])",
+                lambda match: f"{user_name}{match.group(1)}",
+                content,
+                flags=re.I,
+            )
+            content = re.sub(r"(?<![A-Za-z\u4e00-\u9fff])用户(?![A-Za-z\u4e00-\u9fff])", user_name, content)
+        return content
+
+    def _daily_chat_memory_extract_embedded_quotes(self, content: str) -> list[dict]:
+        labels = self._daily_chat_memory_quote_label_pattern()
+        if not labels or not content:
+            return []
+        pattern = re.compile(
+            rf"(?:(?<=^)|(?<=[\s\n…。！？!?；;，,]))(?P<speaker>{labels})\s*[:：]\s*「(?P<text>[^「」]+)」"
+        )
+        return [
+            {"speaker": match.group("speaker"), "text": match.group("text")}
+            for match in pattern.finditer(str(content))
+        ]
+
+    def _daily_chat_memory_strip_quote_texts(self, content: str, quotes: list[dict]) -> str:
+        text = str(content or "")
+        if not text or not quotes:
+            return text.strip()
+        labels = [
+            *self._daily_chat_memory_quote_speakers(),
+            "AI",
+            "助手",
+            "assistant",
+            "Assistant",
+            "用户",
+            "user",
+            "User",
+        ]
+        for quote in quotes:
+            quote_text = str(quote.get("text") or "").strip()
+            if not quote_text:
+                continue
+            escaped = re.escape(quote_text)
+            for label in dict.fromkeys(labels):
+                if not label:
+                    continue
+                text = re.sub(
+                    rf"[\s…]*?{re.escape(label)}\s*[:：]\s*「{escaped}」",
+                    "",
+                    text,
+                    flags=re.I,
+                )
+        return re.sub(r"\n{3,}", "\n\n", text).strip()
+
     def _daily_chat_memory_split_quote_lines(self, content: str) -> tuple[str, list[str]]:
-        speakers = self._daily_chat_memory_quote_speakers()
-        if not speakers:
+        labels = self._daily_chat_memory_quote_label_pattern()
+        if not labels:
             return str(content or "").strip(), []
         pattern = re.compile(
-            r"^\s*(?:" + "|".join(re.escape(name) for name in speakers) + r")\s*[:：]\s*「[^「」\n]+」\s*$"
+            rf"^\s*(?:{labels})\s*[:：]\s*「[^「」\n]+」\s*$"
         )
         narrative_lines: list[str] = []
         quote_lines: list[str] = []
         for line in str(content or "").splitlines():
             if pattern.match(line):
-                quote_lines.append(line.strip())
+                quote_lines.append(self._daily_chat_memory_rewrite_speakers(line.strip()))
             else:
                 narrative_lines.append(line)
-        narrative = re.sub(r"\n{3,}", "\n\n", "\n".join(narrative_lines)).strip()
+        narrative = self._daily_chat_memory_rewrite_speakers(
+            re.sub(r"\n{3,}", "\n\n", "\n".join(narrative_lines)).strip()
+        )
         return narrative, quote_lines
 
     def _daily_chat_memory_quote_line(self, quote: dict) -> str:
@@ -3865,6 +3972,19 @@ class ReflectionEngine:
     def _daily_chat_memory_has_warm_detail(self, content: str) -> bool:
         narrative, quote_lines = self._daily_chat_memory_split_quote_lines(content)
         return bool(quote_lines) or len(narrative) >= DAILY_CHAT_MEMORY_NARRATIVE_MIN_CHARS
+
+    def _daily_chat_memory_claimed_speaker_side(self, claimed: str) -> str:
+        name = str(claimed or "").strip()
+        if not name:
+            return ""
+        user_name = str(self.identity.get("user_display_name") or "").strip()
+        ai_name = str(self.identity.get("ai_name") or "").strip()
+        lowered = name.lower()
+        if name == user_name or lowered in {"用户", "user"} or name == "用户":
+            return "user"
+        if name == ai_name or lowered in {"ai", "assistant"} or name in {"AI", "助手"}:
+            return "ai"
+        return ""
 
     def _daily_chat_memory_verified_quotes(self, raw_quotes: Any, turns: list[dict]) -> list[dict]:
         if not isinstance(raw_quotes, list) or not turns:
@@ -3890,10 +4010,18 @@ class ReflectionEngine:
                 continue
             if "「" in text or "」" in text:
                 continue
-            claimed = str(item.get("speaker") or "").strip()
+            claimed_side = self._daily_chat_memory_claimed_speaker_side(str(item.get("speaker") or ""))
             in_user = key in user_blob
             in_ai = key in ai_blob
-            if in_user and (claimed == user_name or not in_ai):
+            if claimed_side == "user" and in_user:
+                speaker = user_name
+            elif claimed_side == "ai" and in_ai:
+                speaker = ai_name
+            elif in_user and not in_ai:
+                speaker = user_name
+            elif in_ai and not in_user:
+                speaker = ai_name
+            elif in_user and claimed_side != "ai":
                 speaker = user_name
             elif in_ai:
                 speaker = ai_name
