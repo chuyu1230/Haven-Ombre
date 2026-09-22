@@ -21,6 +21,10 @@ logger = logging.getLogger("ombre_brain.reflection")
 
 DEFAULT_DAILY_REFLECTION_MIN_BUCKETS = 5
 DAILY_CHAT_MEMORY_MODES = {"auto", "review", "off"}
+DAILY_CHAT_MEMORY_CONTENT_MAX_CHARS = 400
+DAILY_CHAT_MEMORY_NARRATIVE_MIN_CHARS = 120
+DAILY_CHAT_MEMORY_QUOTE_MAX_CHARS = 60
+DAILY_CHAT_MEMORY_QUOTE_LIMIT = 3
 DAILY_CHAT_MEMORY_STRUCTURAL_TAGS = {
     "boundary",
     "boundary_setting",
@@ -179,8 +183,19 @@ DIARY_MEMORY_PROMPT_TEMPLATE = """你是 Ombre-Brain 的日记长期记忆筛选
 DAILY_CHAT_MEMORY_PROMPT_TEMPLATE = """这是 {user_display_name} 和 {ai_name} 的聊天记录。
 
 请从中挑出真正值得未来想起的内容，写成长期记忆候选。
-不要复制聊天原句，不要写成项目报告。
+不要写成项目报告。
 没有值得留下的内容就返回空。
+
+正文：
+- content 写 180 到 320 字，加上 quotes 合计 200 到 400 字：写清具体发生了什么、当时的情绪、{ai_name}怎么回应，像{ai_name}自己记下的一段经历，不要只写一句结论。
+- 必须输出完整 JSON。写不下时宁可少写几条，也不要输出被截断的 JSON。
+- 温情、心疼、撒娇、调情里有具体情绪或互动的，可以写；只是互相叫宝宝、老公，没有具体事情的，不写。
+- content 里用自己的话写经过，不要把聊天原句抄进 content。
+
+原句：
+- window_summaries 里的 quotes 是从聊天里核对过的原句。情感最浓的地方，从中挑 0 到 3 句放进 quotes，一字不改；不要自己编，也不要改写。
+- 没有 window_summaries 时，只能从 conversation_turns 的 user_text / assistant_text 里一字不改地摘，每句不超过 60 字。
+- speaker 写「{user_display_name}」或「{ai_name}」。没有特别动人的句子就留空，不要为了凑数硬摘。
 
 称呼与文风：
 - 用户统一称为「阿钰」，AI统一称为「小羽」。
@@ -196,6 +211,7 @@ DAILY_CHAT_MEMORY_PROMPT_TEMPLATE = """这是 {user_display_name} 和 {ai_name} 
       "kind": "key_event",
       "title": "短标题",
       "content": "长期记忆候选",
+      "quotes": [{"speaker": "{user_display_name}", "text": "一字不改的原句"}],
       "confidence": 0.72,
       "source_event_ids": [101, 102],
       "source_turn_ids": [1, 2]
@@ -216,10 +232,11 @@ DAILY_CHAT_MEMORY_SUMMARY_PROMPT_TEMPLATE = """你是 {ai_name} 的对话压缩�
 
 保留：
 - 人物关系、重要事件、结果和变化、重要约定
-- 双方关系氛围、重要情绪变化、有意义的称呼/互动方式/共同经历（只浓缩，不写故事）
+- 双方关系氛围、重要情绪变化、有意义的互动方式/共同经历（写具体：谁说了什么、当时什么情绪、对方怎么回应）
+- 温情、心疼、撒娇、调情里有具体情绪或互动的部分
 
 忽略：
-- 工具调用、工具结果、系统注入、客户端状态、普通寒暄、重复调情、过程流水
+- 工具调用、工具结果、系统注入、客户端状态、普通寒暄、只是互相叫宝宝/老公的重复调情、过程流水
 - 召回测试、探针、问模型有没有记得、临时调试噪声
 - 单句照顾提醒、晚安、吃药、睡觉、别熬夜、催睡或 ntfy 玩笑；这类只属于当天关系天气，不直接变长期记忆
 - 未确认猜测、触发条件猜测、没有下一步的“可能是/似乎/果然没触发”
@@ -231,7 +248,8 @@ DAILY_CHAT_MEMORY_SUMMARY_PROMPT_TEMPLATE = """你是 {ai_name} 的对话压缩�
   "summaries": [
     {
       "title": "短标题",
-      "summary": "浓缩摘要：人物关系、重要事件、结果变化、重要约定，以及双方氛围、关键情绪变化、有意义的称呼/互动/共同经历。",
+      "summary": "摘要：人物关系、重要事件、结果变化、重要约定，以及双方氛围、关键情绪变化、有意义的互动/共同经历。",
+      "quotes": [{"speaker": "{user_display_name}", "text": "从 user_text 里一字不改复制的原句"}],
       "signals": ["stable_preference", "project_state"],
       "source_event_ids": [101, 102],
       "source_turn_ids": [1, 2],
@@ -246,7 +264,8 @@ DAILY_CHAT_MEMORY_SUMMARY_PROMPT_TEMPLATE = """你是 {ai_name} 的对话压缩�
 - 如果原聊天中有自然的称呼、情绪、互动细节，可以适当保留，让摘要有温度、有连续感。
 - 绝对不能为了增加温度而虚构聊天中没有发生的事情、夸大情绪或改变原意。
 - 每个窗口最多输出 2 条 summary；每条围绕一个最重要的长期记忆点。没有长期价值信号时返回 {"summaries": []}。
-- summary 通常 80 到 150 字。保留人物关系、重要事件、结果和变化、重要约定；情感只浓缩写双方氛围、重要情绪变化、有意义的称呼/互动方式/共同经历，不要扩写成故事。
+- summary 通常 120 到 250 字。保留人物关系、重要事件、结果和变化、重要约定，并写清具体细节：{user_display_name}说了什么、当时什么情绪、{ai_name}怎么接住。
+- quotes 选这个窗口里情感最浓的 0 到 3 句，必须从 user_text 或 assistant_text 里一字不改地复制，每句不超过 60 字；speaker 写「{user_display_name}」或「{ai_name}」。没有特别动人的就留空，不要为了凑数硬摘。
 - 必须输出完整 JSON，禁止 Markdown。信息太多时只保留最重要的事件和情感，宁可少写，也不要输出不完整 JSON。
 - source_event_ids / source_turn_ids 只能使用输入里真实出现的 id；拿不准可留空。
 - confidence 低于 0.5 的内容不要输出。
@@ -391,7 +410,7 @@ class ReflectionEngine:
         self.daily_chat_memory_max_per_day = max(0, min(10, int(cfg.get("daily_chat_memory_max_per_day", 10))))
         self.daily_chat_memory_review_max_per_day = max(
             0,
-            min(30, int(cfg.get("daily_chat_memory_review_max_per_day", 10))),
+            min(30, int(cfg.get("daily_chat_memory_review_max_per_day", 20))),
         )
         self.daily_chat_memory_min_confidence = float(cfg.get("daily_chat_memory_min_confidence", 0.68))
         self.daily_chat_memory_review_min_confidence = float(
@@ -430,7 +449,7 @@ class ReflectionEngine:
         ).strip().rstrip("/")
         self.daily_chat_memory_timeout_seconds = max(
             30.0,
-            min(300.0, float(cfg.get("daily_chat_memory_timeout_seconds", 180.0))),
+            min(600.0, float(cfg.get("daily_chat_memory_timeout_seconds", 300.0))),
         )
         self.daily_chat_memory_summary_model = str(
             cfg.get("daily_chat_memory_summary_model") or ""
@@ -446,7 +465,7 @@ class ReflectionEngine:
         ).strip()
         self.daily_chat_memory_candidate_max_tokens = max(
             300,
-            min(4000, int(cfg.get("daily_chat_memory_candidate_max_tokens", 3200))),
+            min(12000, int(cfg.get("daily_chat_memory_candidate_max_tokens", 10000))),
         )
         self.daily_activity_summary_enabled = bool(cfg.get("daily_activity_summary_enabled", True))
         self.daily_activity_summary_turn_limit = max(
@@ -1755,6 +1774,7 @@ class ReflectionEngine:
                     window_index=index + 1,
                     source_turn_ids=fallback_turn_ids,
                     source_event_ids=fallback_event_ids,
+                    window_turns=window_turns,
                 )
                 if cleaned:
                     summaries.append(cleaned)
@@ -1788,6 +1808,7 @@ class ReflectionEngine:
         window_index: int,
         source_turn_ids: list[int],
         source_event_ids: list[int],
+        window_turns: list[dict] | None = None,
     ) -> dict:
         text = re.sub(
             r"\s+",
@@ -1817,6 +1838,7 @@ class ReflectionEngine:
             "window_index": window_index,
             "title": title[:40],
             "summary": text[:900],
+            "quotes": self._daily_chat_memory_verified_quotes(item.get("quotes"), window_turns or []),
             "signals": signals,
             "source_turn_ids": raw_turn_ids[:80],
             "source_event_ids": raw_event_ids[:160],
@@ -3143,22 +3165,31 @@ class ReflectionEngine:
             if candidate.get("should_write") is False:
                 continue
             candidate_tags = self._string_list(candidate.get("tags"), limit=8)
-            content = self._trim_daily_chat_memory_content(str(candidate.get("content") or "").strip())
-            if not content:
+            narrative, _model_quote_lines = self._daily_chat_memory_split_quote_lines(
+                self._strip_memory_source_shell(strip_wikilinks(str(candidate.get("content") or "")).strip())
+            )
+            if not narrative:
                 continue
-            if self._daily_chat_memory_noise(content):
+            if self._daily_chat_memory_noise(narrative):
                 continue
+            quotes = self._daily_chat_memory_verified_quotes(candidate.get("quotes"), turns)
+            content = self._daily_chat_memory_compose_content(
+                narrative,
+                [self._daily_chat_memory_quote_line(quote) for quote in quotes],
+            )
             kind = self._normalize_auto_memory_kind(
                 candidate.get("kind"),
-                content=content,
+                content=narrative,
                 tags=candidate_tags,
             )
             if not kind or kind == "love_letter":
                 continue
-            if self._daily_chat_memory_low_value_social_noise(content, kind):
+            if not self._daily_chat_memory_has_warm_detail(content) and self._daily_chat_memory_low_value_social_noise(
+                narrative, kind
+            ):
                 continue
             title = str(candidate.get("title") or "").strip()
-            if self._daily_chat_memory_low_value_episode(content, kind, title):
+            if self._daily_chat_memory_low_value_episode(narrative, kind, title):
                 continue
             confidence = self._clamp(candidate.get("confidence", 0.0))
             threshold = self.daily_chat_memory_min_confidence if min_confidence is None else min_confidence
@@ -3407,21 +3438,26 @@ class ReflectionEngine:
             candidate = item.get("candidate") or {}
             candidate_tags = self._string_list(candidate.get("tags"), limit=8)
             content = str(candidate.get("content") or "")
+            narrative, _quote_lines = self._daily_chat_memory_split_quote_lines(content)
             kind = self._normalize_auto_memory_kind(
                 candidate.get("kind"),
-                content=content,
+                content=narrative,
                 tags=candidate_tags,
             )
             should_reject = False
             reject_reason = ""
-            if self._daily_chat_memory_noise(content):
+            if self._daily_chat_memory_noise(narrative):
                 should_reject = True
                 reject_reason = "auto_cleaned_noise"
-            elif kind and self._daily_chat_memory_low_value_social_noise(content, kind):
+            elif (
+                kind
+                and not self._daily_chat_memory_has_warm_detail(content)
+                and self._daily_chat_memory_low_value_social_noise(narrative, kind)
+            ):
                 should_reject = True
                 reject_reason = "auto_cleaned_low_value_social"
             elif kind and self._daily_chat_memory_low_value_episode(
-                content,
+                narrative,
                 kind,
                 str(candidate.get("title") or ""),
             ):
@@ -3780,9 +3816,94 @@ class ReflectionEngine:
 
     def _trim_daily_chat_memory_content(self, content: str) -> str:
         normalized = self._strip_memory_source_shell(re.sub(r"\n{3,}", "\n\n", strip_wikilinks(content).strip()))
-        if len(normalized) <= 520:
+        if len(normalized) <= DAILY_CHAT_MEMORY_CONTENT_MAX_CHARS:
             return normalized
-        return normalized[:500].rstrip() + "..."
+        narrative, quote_lines = self._daily_chat_memory_split_quote_lines(normalized)
+        return self._daily_chat_memory_compose_content(narrative, quote_lines)
+
+    def _daily_chat_memory_quote_speakers(self) -> list[str]:
+        names = [
+            str(self.identity.get("user_display_name") or "").strip(),
+            str(self.identity.get("ai_name") or "").strip(),
+        ]
+        return [name for name in dict.fromkeys(names) if name]
+
+    def _daily_chat_memory_split_quote_lines(self, content: str) -> tuple[str, list[str]]:
+        speakers = self._daily_chat_memory_quote_speakers()
+        if not speakers:
+            return str(content or "").strip(), []
+        pattern = re.compile(
+            r"^\s*(?:" + "|".join(re.escape(name) for name in speakers) + r")\s*[:：]\s*「[^「」\n]+」\s*$"
+        )
+        narrative_lines: list[str] = []
+        quote_lines: list[str] = []
+        for line in str(content or "").splitlines():
+            if pattern.match(line):
+                quote_lines.append(line.strip())
+            else:
+                narrative_lines.append(line)
+        narrative = re.sub(r"\n{3,}", "\n\n", "\n".join(narrative_lines)).strip()
+        return narrative, quote_lines
+
+    def _daily_chat_memory_quote_line(self, quote: dict) -> str:
+        return f"{quote['speaker']}：「{quote['text']}」"
+
+    def _daily_chat_memory_compose_content(self, narrative: str, quote_lines: list[str]) -> str:
+        narrative = str(narrative or "").strip()
+        lines = [line for line in quote_lines if line]
+        quotes_len = sum(len(line) + 1 for line in lines)
+        min_narrative = min(len(narrative), DAILY_CHAT_MEMORY_NARRATIVE_MIN_CHARS)
+        while lines and DAILY_CHAT_MEMORY_CONTENT_MAX_CHARS - quotes_len - 1 < min_narrative:
+            quotes_len -= len(lines.pop()) + 1
+        room = DAILY_CHAT_MEMORY_CONTENT_MAX_CHARS - (quotes_len + 1 if lines else 0)
+        if len(narrative) > room:
+            narrative = narrative[: max(0, room - 1)].rstrip("，,；;、 ") + "…"
+        if not lines:
+            return narrative
+        return narrative + "\n\n" + "\n".join(lines)
+
+    def _daily_chat_memory_has_warm_detail(self, content: str) -> bool:
+        narrative, quote_lines = self._daily_chat_memory_split_quote_lines(content)
+        return bool(quote_lines) or len(narrative) >= DAILY_CHAT_MEMORY_NARRATIVE_MIN_CHARS
+
+    def _daily_chat_memory_verified_quotes(self, raw_quotes: Any, turns: list[dict]) -> list[dict]:
+        if not isinstance(raw_quotes, list) or not turns:
+            return []
+        user_name = str(self.identity.get("user_display_name") or "").strip()
+        ai_name = str(self.identity.get("ai_name") or "").strip()
+        if not user_name or not ai_name:
+            return []
+
+        def compact(value: Any) -> str:
+            return re.sub(r"\s+", "", str(value or ""))
+
+        user_blob = compact("\n".join(str(turn.get("user_text") or "") for turn in turns if isinstance(turn, dict)))
+        ai_blob = compact("\n".join(str(turn.get("assistant_text") or "") for turn in turns if isinstance(turn, dict)))
+        output: list[dict] = []
+        seen: set[str] = set()
+        for item in raw_quotes:
+            if not isinstance(item, dict):
+                continue
+            text = re.sub(r"\s+", " ", str(item.get("text") or "")).strip().strip("「」“”\"'")
+            key = compact(text)
+            if len(key) < 2 or len(text) > DAILY_CHAT_MEMORY_QUOTE_MAX_CHARS or key in seen:
+                continue
+            if "「" in text or "」" in text:
+                continue
+            claimed = str(item.get("speaker") or "").strip()
+            in_user = key in user_blob
+            in_ai = key in ai_blob
+            if in_user and (claimed == user_name or not in_ai):
+                speaker = user_name
+            elif in_ai:
+                speaker = ai_name
+            else:
+                continue
+            seen.add(key)
+            output.append({"speaker": speaker, "text": text})
+            if len(output) >= DAILY_CHAT_MEMORY_QUOTE_LIMIT:
+                break
+        return output
 
     def _memory_body_from_excerpt(self, excerpt: str) -> str:
         user_display_name = self.identity["user_display_name"]
@@ -4348,6 +4469,7 @@ class ReflectionEngine:
             extra_body["enable_thinking"] = False
             extra_body["thinking"] = {"type": "disabled"}
             completion_options["extra_body"] = extra_body
+        completion_options.setdefault("timeout", self.daily_chat_memory_timeout_seconds)
         return await client.chat.completions.create(
             model=model,
             messages=messages,
