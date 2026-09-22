@@ -1300,9 +1300,9 @@ def _anchor_config() -> tuple[int, float]:
     anchor_cfg = config.get("anchor", {}) if isinstance(config.get("anchor", {}), dict) else {}
     max_count = _int_between(anchor_cfg.get("max_count"), 12, 1, 200)
     try:
-        min_age_hours = float(anchor_cfg.get("min_age_hours", 24))
+        min_age_hours = float(anchor_cfg.get("min_age_hours", 0))
     except (TypeError, ValueError):
-        min_age_hours = 24.0
+        min_age_hours = 0.0
     return max_count, max(0.0, min_age_hours)
 
 
@@ -10990,9 +10990,23 @@ async def api_bucket_update(request):
     content = str(body.get("content") or "").strip() if "content" in body else None
     name = str(body.get("name") or "").strip() if "name" in body else None
     event_date = str(body.get("date") or "").strip() if "date" in body else None
+    pinned = body.get("pinned") if "pinned" in body else None
+    anchor = body.get("anchor") if "anchor" in body else None
+    importance = None
+    if "importance" in body:
+        try:
+            importance = int(body.get("importance"))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "重要度必须是 1 到 10 的整数"}, status_code=400)
+        if importance < 1 or importance > 10:
+            return JSONResponse({"error": "重要度必须是 1 到 10 的整数"}, status_code=400)
+    if pinned is not None and pinned is not True:
+        return JSONResponse({"error": "只能设为钉选，不支持取消"}, status_code=400)
+    if anchor is not None and not isinstance(anchor, bool):
+        return JSONResponse({"error": "anchor must be true or false"}, status_code=400)
 
-    if content is None and name is None and event_date is None:
-        return JSONResponse({"error": "missing content, name, or date"}, status_code=400)
+    if all(value is None for value in (content, name, event_date, pinned, anchor, importance)):
+        return JSONResponse({"error": "missing content, name, date, pinned, anchor, or importance"}, status_code=400)
     if event_date:
         normalized_date = local_date_key(event_date)
         if not normalized_date:
@@ -11009,6 +11023,15 @@ async def api_bucket_update(request):
             return JSONResponse({"error": "empty content"}, status_code=400)
         if _has_favorite_tag(meta.get("tags", [])) and not _has_favorite_reason(content):
             return JSONResponse({"error": _favorite_reason_error()}, status_code=400)
+    is_locked = bool(meta.get("pinned") or meta.get("protected"))
+    if importance is not None and is_locked:
+        return JSONResponse({"error": "钉选或受保护的桶重要度锁定为 10，不能修改"}, status_code=400)
+    if anchor is True and not meta.get("anchor"):
+        if is_locked or pinned is True:
+            return JSONResponse({"error": "钉选的桶不需要再标 Anchor"}, status_code=400)
+        can_anchor, anchor_message = await _can_mark_anchor(bucket_id, bucket)
+        if not can_anchor:
+            return JSONResponse({"error": anchor_message}, status_code=400)
 
     update_kwargs = {}
     if content is not None:
@@ -11017,6 +11040,12 @@ async def api_bucket_update(request):
         update_kwargs["name"] = name or None
     if event_date is not None:
         update_kwargs["date"] = event_date
+    if pinned is True and not meta.get("pinned"):
+        update_kwargs["pinned"] = True
+    if anchor is not None:
+        update_kwargs["anchor"] = anchor
+    if importance is not None:
+        update_kwargs["importance"] = importance
     update_kwargs["last_active"] = meta.get("last_active") or meta.get("created")
 
     before_bucket = bucket

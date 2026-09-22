@@ -761,6 +761,37 @@
     gap: 6px;
     margin-top: 4px;
   }
+  .date-edit-form input[type="number"] {
+    width: 64px;
+    padding: 4px 6px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: 12px;
+  }
+  .field-toggle-button {
+    padding: 2px 8px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: 11px;
+    line-height: 1.4;
+  }
+  .field-toggle-button:hover {
+    background: var(--accent-glow);
+    color: var(--accent-dark);
+  }
+  .field-edit-hint {
+    font-size: 11px;
+    color: var(--text-light);
+  }
+  .bucket-row.bulk .name,
+  .bucket-row.bulk .preview {
+    cursor: zoom-in;
+  }
   .date-edit-form input[type="date"] {
     min-width: 128px;
     padding: 4px 6px;
@@ -6367,15 +6398,16 @@ function renderBuckets(buckets) {
           '<input type="checkbox" ' + (checked ? 'checked ' : '') + (blockReason ? 'disabled ' : '') + 'onchange="setBucketSelection(\'' + jsString(id) + '\', this.checked)" />' +
         '</label>'
       : '';
+    var peekClick = bucketBulkMode ? ' onclick="event.stopPropagation(); showDetail(\'' + jsString(id) + '\')"' : '';
     return '<div class="' + rowClass + '" onclick="' + rowClick + '">' +
       selectHtml +
       '<span class="icon">' + icon + '</span>' +
-      '<span class="name" title="' + esc(b.name) + '">' + esc(b.name) + '</span>' +
+      '<span class="name" title="' + esc(bucketBulkMode ? '点击查看内容：' + b.name : b.name) + '"' + peekClick + '>' + esc(b.name) + '</span>' +
       '<span class="domain" title="key: ' + escAttr(canonicalLabel || '—') + ' · legacy: ' + escAttr(legacyLabel || '—') + '">' + esc(domainLabel || legacyLabel || '—') + '</span>' +
       '<span class="emotion"><span class="v-bar"><span class="v-dot" style="left:' + vPos + '%"></span></span>' + modelV + '</span>' +
       '<span class="score">' + b.score.toFixed(2) + '</span>' +
       '<span class="time">' + esc(timeAgo) + '</span>' +
-      '<span class="preview">' + esc(b.content_preview) + '</span>' +
+      '<span class="preview"' + peekClick + '>' + esc(b.content_preview) + '</span>' +
     '</div>';
   }).join('');
 }
@@ -6450,7 +6482,21 @@ async function showDetail(id) {
         '<div class="field"><label>事件效价</label>V' + (meta.valence || 0.5).toFixed(2) + '</div>' +
         '<div class="field"><label>唤醒度</label>A' + (meta.arousal || 0.3).toFixed(2) + '</div>' +
         '<div class="field"><label>模型视角</label>' + (meta.model_valence != null ? 'V' + meta.model_valence.toFixed(2) : '—') + '</div>' +
-        '<div class="field"><label>重要度</label>' + (meta.importance || 5) + '/10</div>' +
+        '<div class="field"><label>重要度</label>' +
+          '<div id="bucket-importance-view" class="field-edit-line">' +
+            '<span>' + (meta.importance || 5) + '/10</span>' +
+            ((meta.pinned || meta.protected)
+              ? '<span class="field-edit-hint">钉选锁定</span>'
+              : '<button type="button" class="field-edit-button" onclick="startBucketImportanceEdit()" aria-label="编辑重要度" title="编辑重要度">✎</button>') +
+          '</div>' +
+          '<form id="bucket-importance-edit" class="date-edit-form hidden" onsubmit="submitBucketImportanceEdit(event, \'' + jsString(id) + '\')">' +
+            '<input name="importance" type="number" min="1" max="10" step="1" value="' + escAttr(String(meta.importance || 5)) + '" aria-label="重要度" />' +
+            '<div class="content-edit-actions">' +
+              '<button type="button" class="secondary" onclick="cancelBucketImportanceEdit()">取消</button>' +
+              '<button type="submit">保存</button>' +
+            '</div>' +
+          '</form>' +
+        '</div>' +
         '<div class="field"><label>置信度</label>' + (meta.confidence != null ? meta.confidence.toFixed(2) : '—') + '</div>' +
         '<div class="field"><label>周期</label>' + esc(meta.period || '—') + '</div>' +
         '<div class="field"><label>日期</label>' +
@@ -6470,8 +6516,22 @@ async function showDetail(id) {
         '<div class="field"><label>激活次数</label>' + (meta.activation_count || 0) + '</div>' +
         '<div class="field"><label>可浮现</label>' + (isSurfaceableBucket(b) ? '✓' : '—') + '</div>' +
         '<div class="field"><label>已消化</label>' + (meta.digested ? '✓' : '—') + '</div>' +
-        '<div class="field"><label>钉选</label>' + (meta.pinned ? '✓' : '—') + '</div>' +
-        '<div class="field"><label>Anchor</label>' + (meta.anchor ? '✓' : '—') + '</div>' +
+        '<div class="field"><label>钉选</label>' +
+          '<div class="field-edit-line">' +
+            (meta.pinned
+              ? '<span>✓</span>'
+              : '<span>—</span><button type="button" class="field-toggle-button" onclick="setBucketFlag(\'' + jsString(id) + '\', \'pinned\', true)">📌 钉选</button>') +
+          '</div>' +
+        '</div>' +
+        '<div class="field"><label>Anchor</label>' +
+          '<div class="field-edit-line">' +
+            (meta.anchor
+              ? '<span>✓</span><button type="button" class="field-toggle-button" onclick="setBucketFlag(\'' + jsString(id) + '\', \'anchor\', false)">取消 Anchor</button>'
+              : (meta.pinned || meta.protected)
+                ? '<span>—</span><span class="field-edit-hint">已钉选，无需 Anchor</span>'
+                : '<span>—</span><button type="button" class="field-toggle-button" onclick="setBucketFlag(\'' + jsString(id) + '\', \'anchor\', true)">⚓ 设为 Anchor</button>') +
+          '</div>' +
+        '</div>' +
         '<div class="field"><label>创建</label>' + esc(meta.created || '—') + '</div>' +
         '<div class="field"><label>最后活跃</label>' + esc(meta.last_active || '—') + '</div>' +
       '</div>' +
@@ -6680,6 +6740,78 @@ async function submitBucketDateEdit(event, bucketId) {
     alert('保存日期失败: ' + e.message);
     button.disabled = false;
     button.textContent = '保存';
+  }
+}
+
+function startBucketImportanceEdit() {
+  var view = document.getElementById('bucket-importance-view');
+  var form = document.getElementById('bucket-importance-edit');
+  if (!view || !form) return;
+  view.classList.add('hidden');
+  form.classList.remove('hidden');
+  var input = form.querySelector('input[name="importance"]');
+  if (input) input.focus();
+}
+
+function cancelBucketImportanceEdit() {
+  var view = document.getElementById('bucket-importance-view');
+  var form = document.getElementById('bucket-importance-edit');
+  if (!view || !form) return;
+  form.classList.add('hidden');
+  view.classList.remove('hidden');
+}
+
+async function submitBucketImportanceEdit(event, bucketId) {
+  event.preventDefault();
+  var form = event.target;
+  var input = form.querySelector('input[name="importance"]');
+  var value = parseInt(input.value, 10);
+  if (!(value >= 1 && value <= 10)) {
+    alert('重要度必须是 1 到 10 的整数');
+    return;
+  }
+  var button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  button.textContent = '保存中…';
+  try {
+    var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(bucketId), {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({importance: value})
+    });
+    if (!res) return;
+    if (!res.ok) {
+      var data = await res.json().catch(() => ({}));
+      throw new Error(data.error || '保存失败');
+    }
+    await showDetail(bucketId);
+    await loadBuckets();
+  } catch (e) {
+    alert('保存重要度失败: ' + e.message);
+    button.disabled = false;
+    button.textContent = '保存';
+  }
+}
+
+async function setBucketFlag(bucketId, flag, value) {
+  if (flag === 'pinned' && value && !confirm('钉选后这条记忆永不衰减、重要度锁定为 10，看板里不能取消。确定钉选吗？')) return;
+  var payload = {};
+  payload[flag] = value;
+  try {
+    var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(bucketId), {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    if (!res) return;
+    if (!res.ok) {
+      var data = await res.json().catch(() => ({}));
+      throw new Error(data.error || '保存失败');
+    }
+    await showDetail(bucketId);
+    await loadBuckets();
+  } catch (e) {
+    alert('操作失败: ' + e.message);
   }
 }
 

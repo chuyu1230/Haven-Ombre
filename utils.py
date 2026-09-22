@@ -242,7 +242,7 @@ def load_config(config_path: str = None) -> dict:
         },
         "anchor": {
             "max_count": 24,
-            "min_age_hours": 24,
+            "min_age_hours": 0,
         },
         "node_facets": {
             "enabled": True,

@@ -118,7 +118,7 @@ dehydration:
 # anchor 是少量长期重要记忆的标记，和 breath 浮现、关键词检索各自分工。
 anchor:
   max_count: 12
-  min_age_hours: 24
+  min_age_hours: 0
 
 # --- Self anchor / AI self entry ---
 # entry_bucket_id selects the total self entry used by handoff and portrait.
